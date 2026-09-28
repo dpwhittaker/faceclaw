@@ -81,8 +81,13 @@ export type PushToTalkOptions = {
   beamFilter?: { centerDeg: number; halfWidthDeg: number } | null;
 };
 
-/** Who currently wants the mic running. */
-type CaptureHolder = "ptt" | "continuous";
+/**
+ * Who currently wants the mic running. "continuous" is Transcribe and the
+ * other open-mic apps; "cue" is Cue, which keeps its own hold so another
+ * app's release doesn't stop it, and needs Soniox for speaker labels.
+ */
+type CaptureHolder = "ptt" | ContinuousCaptureHolder;
+export type ContinuousCaptureHolder = "continuous" | "cue";
 
 export type RawPcmListener = (pcm: Uint8Array) => void;
 
@@ -125,6 +130,8 @@ export class FaceclawVoiceControlBridge {
   private captureEndpointing = false;
   // Non-null while a cloud provider owns the transcript; Java only decodes PCM.
   private cloudClient: CloudSttClient | null = null;
+  // The provider the running capture was started with.
+  private activeProvider: VoiceProviderKind | null = null;
   // Raw-PCM tap (EvenHub mic apps): when active, the controller runs in the
   // decode-only "cloud" mode and every decoded PCM frame is broadcast to these
   // listeners. STT capture preempts it — a live assistant/transcribe session
@@ -201,13 +208,13 @@ export class FaceclawVoiceControlBridge {
     return finished;
   }
 
-  /** Begin continuous capture (Transcribe): the mic stays on until released. */
-  startContinuousCapture(options: PushToTalkOptions): void {
-    this.acquireCapture("continuous", options);
+  /** Begin continuous capture (Transcribe, Cue): the mic stays on until that holder releases it. */
+  startContinuousCapture(options: PushToTalkOptions, holder: ContinuousCaptureHolder = "continuous"): void {
+    this.acquireCapture(holder, options);
   }
 
-  stopContinuousCapture(): void {
-    this.releaseCapture("continuous", false);
+  stopContinuousCapture(holder: ContinuousCaptureHolder = "continuous"): void {
+    this.releaseCapture(holder, false);
   }
 
   /** Subscribe to decoded raw mic PCM (16 kHz mono S16LE). */
@@ -278,7 +285,10 @@ export class FaceclawVoiceControlBridge {
     const micLive = this.micIsLive();
     this.suspendedHolders.delete(holder);
     this.captureHolders.add(holder);
-    if (micLive) {
+    // Cue needs Soniox's speaker labels, so while it holds the mic every
+    // holder shares a Soniox stream.
+    if (this.captureHolders.has("cue")) options = { ...options, provider: "soniox" };
+    if (micLive && options.provider === this.activeProvider) {
       // Mic already running; the new holder just shares the existing stream
       // (transcripts are already broadcast to its listeners).
       return;
@@ -316,6 +326,7 @@ export class FaceclawVoiceControlBridge {
     this.setStatus("Starting microphone...");
     // A previous push-to-talk commit may still be awaiting its final result.
     this.cloudClient?.stop();
+    this.activeProvider = options.provider;
     const cloudClient = this.createCloudClient(options);
     if (cloudClient) {
       this.cloudClient = cloudClient;
@@ -350,7 +361,7 @@ export class FaceclawVoiceControlBridge {
       onError: (message: string) => this.setStatus(message),
     };
     const reconnecting = (create: (options: CloudSttOptions) => CloudSttClient, apiKey: string) =>
-      new ReconnectingSttClient(create, { ...sttOptions, apiKey }, () => this.captureHolders.has("continuous"));
+      new ReconnectingSttClient(create, { ...sttOptions, apiKey }, () => this.holdsOpenMic());
     if (options.provider === "elevenlabs") {
       const apiKey = options.elevenLabsApiKey.trim();
       if (!apiKey) {
@@ -437,6 +448,11 @@ export class FaceclawVoiceControlBridge {
     return this.suspendedHolders.size > 0 || this.suspendedRaw;
   }
 
+  /** Whether an open-mic holder (not just push-to-talk) wants the stream kept alive. */
+  private holdsOpenMic(): boolean {
+    return this.captureHolders.has("continuous") || this.captureHolders.has("cue");
+  }
+
   /** Whether anyone holds the mic, including across a session outage. */
   isCaptureHeld(): boolean {
     return this.captureHolders.size > 0 || this.suspendedHolders.size > 0;
@@ -450,7 +466,8 @@ export class FaceclawVoiceControlBridge {
    * this does not ask again.
    */
   resumeCapture(options: Omit<PushToTalkOptions, "endpointing">): void {
-    const holders = Array.from(this.suspendedHolders);
+    // Cue first, so the stream restarts on Soniox once rather than twice.
+    const holders = Array.from(this.suspendedHolders).sort((a, b) => Number(b === "cue") - Number(a === "cue"));
     const resumeRaw = this.suspendedRaw;
     this.suspendedHolders.clear();
     this.suspendedRaw = false;
@@ -482,6 +499,7 @@ export class FaceclawVoiceControlBridge {
     this.started = false;
     this.cloudClient?.stop();
     this.cloudClient = null;
+    this.activeProvider = null;
   }
 
   private ensureController(): void {
@@ -508,7 +526,7 @@ export class FaceclawVoiceControlBridge {
       onPcm: (pcm: any) => {
         const bytes = toUint8Array(pcm);
         this.cloudClient?.acceptPcm(bytes);
-        if (!this.cloudClient && this.captureHolders.has("continuous") && this.speechPause.accept(bytes)) {
+        if (!this.cloudClient && this.holdsOpenMic() && this.speechPause.accept(bytes)) {
           for (const listener of this.speechPauseListeners) listener();
         }
         if (this.rawPcmListeners.size > 0) {

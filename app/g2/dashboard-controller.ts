@@ -49,7 +49,7 @@ import { GlanceHost } from "./glance-host";
 import { type GlanceEvent } from "./glance-state";
 import { isWelcomeSoundPending, setWelcomeSoundPending } from "../phone-ui/onboarding-state";
 import { beginRenderPass, endRenderPass } from "../util/render-freshness";
-import { voiceControlBridge } from "../native/voice-control";
+import { type ContinuousCaptureHolder, voiceControlBridge } from "../native/voice-control";
 import { G2_LENS_HEIGHT, G2_LENS_WIDTH, GrayImage } from "../graphics/image";
 import { flattenPlanesWithDraws, planesFingerprint, type Plane } from "../graphics/plane";
 import { prepareFrameDraws } from "../graphics/glyph-wire";
@@ -334,8 +334,8 @@ class DashboardController {
       endTextSettingEdit: () => this.endTextSettingEdit(),
       startVoiceCapture: (endpointing = false) => this.startVoiceCapture(endpointing),
       stopVoiceCapture: () => this.stopVoiceCapture(),
-      startContinuousVoiceCapture: () => this.startContinuousVoiceCapture(),
-      stopContinuousVoiceCapture: () => this.stopContinuousVoiceCapture(),
+      startContinuousVoiceCapture: (holder) => this.startContinuousVoiceCapture(holder),
+      stopContinuousVoiceCapture: (holder) => this.stopContinuousVoiceCapture(holder),
       playBuzzerSequence: (payload: Uint8Array) => this.playBuzzerSequence(payload),
     };
     this.sharedActions = sharedActions;
@@ -1919,12 +1919,12 @@ class DashboardController {
     return voiceControlBridge.stopPushToTalk();
   }
 
-  private startContinuousVoiceCapture(): void {
-    this.beginVoiceCapture("continuous");
+  private startContinuousVoiceCapture(holder: ContinuousCaptureHolder = "continuous"): void {
+    this.beginVoiceCapture(holder);
   }
 
-  private stopContinuousVoiceCapture(): void {
-    voiceControlBridge.stopContinuousCapture();
+  private stopContinuousVoiceCapture(holder: ContinuousCaptureHolder = "continuous"): void {
+    voiceControlBridge.stopContinuousCapture(holder);
   }
 
   /**
@@ -1981,7 +1981,7 @@ class DashboardController {
     return granted;
   }
 
-  private async beginVoiceCapture(kind: "ptt" | "continuous", endpointing = false): Promise<void> {
+  private async beginVoiceCapture(kind: "ptt" | ContinuousCaptureHolder, endpointing = false): Promise<void> {
     const pttGeneration = kind === "ptt" ? ++this.pttCaptureGeneration : 0;
     // Preview mode captures from the phone mic (voiceCaptureOptions with a
     // null communicator); otherwise a live glasses session must be the source.
@@ -2005,7 +2005,7 @@ class DashboardController {
         if (kind === "ptt") {
           voiceControlBridge.startPushToTalk(options);
         } else {
-          voiceControlBridge.startContinuousCapture(options);
+          voiceControlBridge.startContinuousCapture(options, kind);
         }
       })
       .catch((error) => {
