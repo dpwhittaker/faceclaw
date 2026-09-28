@@ -1,6 +1,6 @@
 import { hasCalendarPermission } from "./calendar-permissions";
-import { type CalendarEvent, type CalendarReadState } from "./calendar-types";
-export type { CalendarEvent } from "./calendar-types";
+import { type CalendarEvent, type CalendarEventDetails, type CalendarReadState } from "./calendar-types";
+export type { CalendarAttendee, CalendarEvent, CalendarEventDetails } from "./calendar-types";
 
 declare const FaceclawCalendar: any;
 
@@ -83,6 +83,11 @@ export function readUpcomingEvents(maxEvents = 50, windowMs = DEFAULT_WINDOW_MS,
     catch { finish("[]", "Calendar unavailable"); }
   }
   return (cache?.events ?? []).filter(event => event.endMs > now);
+}
+
+/** Cue runs on Android only; EventKit's attendees and ids are not read yet. */
+export function readEventDetails(_startMs: number, _endMs: number, _maxEvents = 50): CalendarEventDetails[] {
+  return [];
 }
 
 /** Assistant queries await their own result without replacing the display cache. */

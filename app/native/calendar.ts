@@ -1,8 +1,14 @@
 import { Utils } from "@nativescript/core";
 import { hasCalendarPermission } from "../g2/android-permissions";
 import { spanCurrent } from "./frame-timings";
-import { type CalendarEvent, type CalendarReadState } from "./calendar-types";
-export type { CalendarEvent } from "./calendar-types";
+import {
+  type CalendarAttendee,
+  type CalendarEvent,
+  type CalendarEventDetails,
+  type CalendarReadState,
+  type CalendarResponse,
+} from "./calendar-types";
+export type { CalendarAttendee, CalendarEvent, CalendarEventDetails } from "./calendar-types";
 
 declare const com: any;
 
@@ -74,6 +80,33 @@ export async function readUpcomingEventsAsync(maxEvents = DEFAULT_MAX_EVENTS, wi
   return readUpcomingEvents(maxEvents, windowMs);
 }
 
+/**
+ * Occurrences overlapping [startMs, endMs] with attendees, description and
+ * stable ids, for Cue. Pass startMs === endMs for what is on at that moment.
+ * Uncached: Cue reads it when a context starts or the Switch menu opens.
+ */
+export function readEventDetails(startMs: number, endMs: number, maxEvents = DEFAULT_MAX_EVENTS): CalendarEventDetails[] {
+  if (!global.isAndroid || !hasCalendarPermission()) return [];
+  const context = Utils.android.getApplicationContext();
+  if (!context) return [];
+  try {
+    const json = String(
+      com.faceclaw.app.FaceclawCalendarProvider.getEventDetailsJson(
+        context,
+        Math.round(startMs),
+        Math.round(endMs),
+        Math.max(0, Math.round(maxEvents)),
+      ),
+    );
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed)
+      ? parsed.map(normalizeEventDetails).filter((event): event is CalendarEventDetails => Boolean(event))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Drop the cached events so the next read re-queries the provider. */
 export function invalidateCalendarCache(): void {
   cache = null;
@@ -91,5 +124,45 @@ function normalizeEvent(value: any): CalendarEvent | null {
     allDay: Boolean(value.allDay),
     location: String(value.location ?? ""),
     calendarName: String(value.calendarName ?? ""),
+  };
+}
+
+const RESPONSES: readonly CalendarResponse[] = ["accepted", "declined", "tentative", "invited", "none"];
+const ATTENDEE_TYPES: readonly CalendarAttendee["type"][] = ["required", "optional", "resource", "none"];
+const ATTENDEE_ROLES: readonly CalendarAttendee["role"][] = ["organizer", "attendee", "performer", "speaker", "none"];
+const EVENT_STATUSES: readonly CalendarEventDetails["status"][] = ["confirmed", "tentative", "canceled"];
+
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+function normalizeEventDetails(value: any): CalendarEventDetails | null {
+  const event = normalizeEvent(value);
+  if (!event) return null;
+  const attendees: CalendarAttendee[] = Array.isArray(value.attendees)
+    ? value.attendees
+        .filter((attendee: any) => attendee && typeof attendee === "object")
+        .map((attendee: any) => ({
+          name: String(attendee.name ?? ""),
+          email: String(attendee.email ?? ""),
+          type: oneOf(attendee.type, ATTENDEE_TYPES, "none"),
+          role: oneOf(attendee.role, ATTENDEE_ROLES, "none"),
+          status: oneOf(attendee.status, RESPONSES, "none"),
+          self: Boolean(attendee.self),
+        }))
+    : [];
+  return {
+    ...event,
+    id: Number(value.id) || 0,
+    description: String(value.description ?? ""),
+    organizer: String(value.organizer ?? ""),
+    selfStatus: oneOf(value.selfStatus, RESPONSES, "none"),
+    status: oneOf(value.status, EVENT_STATUSES, "confirmed"),
+    recurring: Boolean(value.recurring),
+    syncId: String(value.syncId ?? ""),
+    originalId: Number(value.originalId) || 0,
+    originalSyncId: String(value.originalSyncId ?? ""),
+    originalInstanceMs: Number(value.originalInstanceMs) || 0,
+    attendees,
   };
 }
