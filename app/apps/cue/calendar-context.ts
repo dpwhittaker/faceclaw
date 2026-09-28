@@ -41,42 +41,84 @@ function instanceStamp(ms: number, allDay: boolean): string {
 }
 
 /**
- * The events Switch lists as happening now, best first: timed events you
- * haven't declined that are under way or start within EARLY_JOIN_MS. Ones
- * already under way come first; then ones you're required at (or organized,
- * or that are yours alone) before ones you're optional at or not invited to;
- * then the most recently started, since a meeting that just began usually
- * sits inside a longer block.
+ * Who "you" are to the calendar. A phone can sync several people's accounts
+ * (a spouse's, a shared family one), so neither the calendar's owner nor the
+ * syncing account says which attendee is you.
  */
-export function eventsOnNow(events: CalendarEventDetails[], nowMs: number): CalendarEventDetails[] {
+export type CalendarScope = {
+  /** Your addresses, matched case-insensitively against attendees and syncing accounts. */
+  emails: string[];
+  /**
+   * Calendars whose events are yours whether or not you're on the guest list.
+   * Unset: every calendar synced through one of your addresses.
+   */
+  calendarIds?: number[];
+};
+
+function normalizedEmails(scope: CalendarScope): Set<string> {
+  return new Set(scope.emails.map((email) => email.trim().toLowerCase()).filter(Boolean));
+}
+
+/** Your attendee entry, if you're on the guest list. */
+export function yourAttendee(event: CalendarEventDetails, scope: CalendarScope) {
+  const emails = normalizedEmails(scope);
+  return event.attendees.find((attendee) => emails.has(attendee.email.toLowerCase()));
+}
+
+function onYourCalendar(event: CalendarEventDetails, scope: CalendarScope): boolean {
+  if (scope.calendarIds) return scope.calendarIds.includes(event.calendarId);
+  return normalizedEmails(scope).has(event.accountName.toLowerCase());
+}
+
+/**
+ * An event on one of your calendars, or one you're invited to. With no
+ * addresses configured every event counts, since there's nothing to tell by.
+ */
+export function isYourEvent(event: CalendarEventDetails, scope: CalendarScope): boolean {
+  if (normalizedEmails(scope).size === 0 && !scope.calendarIds) return true;
+  return onYourCalendar(event, scope) || yourAttendee(event, scope) !== undefined;
+}
+
+/** Your response: from your guest-list entry, else the calendar's own if the calendar is yours. */
+function yourResponse(event: CalendarEventDetails, scope: CalendarScope) {
+  const attendee = yourAttendee(event, scope);
+  if (attendee) return attendee.status;
+  return normalizedEmails(scope).has(event.accountName.toLowerCase()) ? event.selfStatus : "none";
+}
+
+/**
+ * The events Switch lists as happening now, best first: your timed events
+ * you haven't declined that are under way or start within EARLY_JOIN_MS.
+ * Ones already under way come first; then ones you're required at (or
+ * organized, or that have no guest list) before ones you're optional at or
+ * not on the guest list of; then the most recently started, since a meeting
+ * that just began usually sits inside a longer block.
+ */
+export function eventsOnNow(events: CalendarEventDetails[], nowMs: number, scope: CalendarScope): CalendarEventDetails[] {
   return events
     .filter((event) =>
       !event.allDay &&
       event.status !== "canceled" &&
-      event.selfStatus !== "declined" &&
-      selfAttendee(event)?.status !== "declined" &&
+      isYourEvent(event, scope) &&
+      yourResponse(event, scope) !== "declined" &&
       event.startMs <= nowMs + EARLY_JOIN_MS &&
       nowMs < event.endMs)
     .sort((a, b) =>
       Number(a.startMs > nowMs) - Number(b.startMs > nowMs) ||
-      attendanceRank(a) - attendanceRank(b) ||
+      attendanceRank(a, scope) - attendanceRank(b, scope) ||
       b.startMs - a.startMs ||
       (a.endMs - a.startMs) - (b.endMs - b.startMs) ||
       a.id - b.id);
 }
 
 /** The event a scheduled context starts from right now, or null. */
-export function currentEvent(events: CalendarEventDetails[], nowMs: number): CalendarEventDetails | null {
-  return eventsOnNow(events, nowMs)[0] ?? null;
+export function currentEvent(events: CalendarEventDetails[], nowMs: number, scope: CalendarScope): CalendarEventDetails | null {
+  return eventsOnNow(events, nowMs, scope)[0] ?? null;
 }
 
-function selfAttendee(event: CalendarEventDetails) {
-  return event.attendees.find((attendee) => attendee.self);
-}
-
-/** 0: you're required, organized it, or it has no guests; 1: optional, or you're not on the list. */
-function attendanceRank(event: CalendarEventDetails): number {
-  const self = selfAttendee(event);
-  if (!self) return event.attendees.length === 0 ? 0 : 1;
-  return self.type === "optional" || self.type === "resource" ? 1 : 0;
+/** 0: you're required, organized it, or it has no guest list; 1: optional, or you're not on the list. */
+function attendanceRank(event: CalendarEventDetails, scope: CalendarScope): number {
+  const you = yourAttendee(event, scope);
+  if (!you) return event.attendees.length === 0 ? 0 : 1;
+  return you.type === "optional" || you.type === "resource" ? 1 : 0;
 }

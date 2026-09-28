@@ -38,9 +38,11 @@ public final class FaceclawCalendarProvider {
             CalendarContract.Instances.CALENDAR_DISPLAY_NAME,
     };
 
-    // PROJECTION plus the columns Cue needs to pick and describe a meeting.
-    // All are Events or Calendars columns the provider's Instances join
-    // exposes; _SYNC_ID is not among them, so it comes from the Events table.
+    // PROJECTION plus the columns Cue needs to pick and describe a meeting:
+    // Events and Calendars columns that Instances documents. The sync columns
+    // (_SYNC_ID, ACCOUNT_NAME) come from the Events and Calendars tables,
+    // which document them; Samsung's provider also exposes them on Instances,
+    // but that isn't promised.
     private static final String[] DETAIL_PROJECTION = {
             CalendarContract.Instances.EVENT_ID,
             CalendarContract.Instances.TITLE,
@@ -57,6 +59,7 @@ public final class FaceclawCalendarProvider {
             CalendarContract.Instances.ORIGINAL_ID,
             CalendarContract.Instances.ORIGINAL_SYNC_ID,
             CalendarContract.Instances.ORIGINAL_INSTANCE_TIME,
+            CalendarContract.Instances.CALENDAR_ID,
             CalendarContract.Instances.OWNER_ACCOUNT,
     };
 
@@ -112,11 +115,13 @@ public final class FaceclawCalendarProvider {
      * fields of getUpcomingEventsJson plus description, organizer, selfStatus
      * and status, recurring, originalId, originalSyncId and originalInstanceMs
      * (set on an occurrence that was moved or edited on its own), syncId (the
-     * sync adapter's id, Google's event id for a Google calendar), and
-     * attendees [{name, email, type, role, status, self}]. Pass startMs ==
-     * endMs for "what is on now". The detail columns and the attendees are
-     * read best-effort: if the provider rejects them, the basic fields still
-     * come back.
+     * sync adapter's id, Google's event id for a Google calendar), the
+     * calendar's calendarId, accountName (the account it syncs through) and
+     * ownerAccount, and attendees [{name, email, type, role, status}]. Which
+     * attendee is you is left to the caller: a phone can sync several
+     * people's accounts. Pass startMs == endMs for "what is on now". The
+     * detail columns and the attendees are read best-effort: if the provider
+     * rejects them, the basic fields still come back.
      */
     public static String getEventDetailsJson(Context context, long startMs, long endMs, int maxEvents) {
         if (context == null || maxEvents <= 0 || endMs < startMs) {
@@ -162,10 +167,17 @@ public final class FaceclawCalendarProvider {
         }
 
         Set<Long> eventIds = new LinkedHashSet<>();
+        Set<Long> calendarIds = new LinkedHashSet<>();
         for (JSONObject event : events) {
             eventIds.add(event.optLong("id"));
+            if (event.has("calendarId")) {
+                calendarIds.add(event.optLong("calendarId"));
+            }
         }
-        Map<Long, String> syncIds = readSyncIds(context, eventIds);
+        Map<Long, String> syncIds = readStrings(context, CalendarContract.Events.CONTENT_URI,
+                CalendarContract.Events._ID, CalendarContract.Events._SYNC_ID, eventIds);
+        Map<Long, String> accountNames = readStrings(context, CalendarContract.Calendars.CONTENT_URI,
+                CalendarContract.Calendars._ID, CalendarContract.Calendars.ACCOUNT_NAME, calendarIds);
         Map<Long, JSONArray> attendees = readAttendees(context, eventIds);
 
         JSONArray out = new JSONArray();
@@ -174,13 +186,10 @@ public final class FaceclawCalendarProvider {
             try {
                 String syncId = syncIds.get(id);
                 event.put("syncId", syncId == null ? "" : syncId);
+                String accountName = accountNames.get(event.optLong("calendarId"));
+                event.put("accountName", accountName == null ? "" : accountName);
                 JSONArray eventAttendees = attendees.get(id);
-                if (eventAttendees == null) {
-                    eventAttendees = new JSONArray();
-                }
-                markSelf(eventAttendees, event.optString("ownerAccount"));
-                event.put("attendees", eventAttendees);
-                event.remove("ownerAccount");
+                event.put("attendees", eventAttendees == null ? new JSONArray() : eventAttendees);
             } catch (JSONException e) {
                 Log.w(TAG, "failed to add calendar event details", e);
             }
@@ -228,24 +237,23 @@ public final class FaceclawCalendarProvider {
         event.put("originalId", originalId);
         event.put("originalSyncId", stringAt(cursor, 13));
         event.put("originalInstanceMs", cursor.isNull(14) ? 0L : cursor.getLong(14));
-        // Used to find "you" among the attendees, then dropped.
-        event.put("ownerAccount", stringAt(cursor, 15));
+        event.put("calendarId", cursor.isNull(15) ? 0L : cursor.getLong(15));
+        event.put("ownerAccount", stringAt(cursor, 16));
     }
 
-    /** Events._SYNC_ID by event id, read from the Events table; empty on failure. */
-    private static Map<Long, String> readSyncIds(Context context, Set<Long> eventIds) {
+    /** One string column by row id, for the given ids; empty on failure. */
+    private static Map<Long, String> readStrings(Context context, Uri uri, String idColumn, String column, Set<Long> ids) {
         Map<Long, String> out = new HashMap<>();
-        if (eventIds.isEmpty()) {
+        if (ids.isEmpty()) {
             return out;
         }
-        String[] projection = {CalendarContract.Events._ID, CalendarContract.Events._SYNC_ID};
         Cursor cursor = null;
         try {
             cursor = context.getContentResolver().query(
-                    CalendarContract.Events.CONTENT_URI,
-                    projection,
-                    inSelection(CalendarContract.Events._ID, eventIds.size()),
-                    inArgs(eventIds),
+                    uri,
+                    new String[] {idColumn, column},
+                    inSelection(idColumn, ids.size()),
+                    inArgs(ids),
                     null);
             if (cursor != null) {
                 while (cursor.moveToNext()) {
@@ -255,7 +263,7 @@ public final class FaceclawCalendarProvider {
                 }
             }
         } catch (Throwable t) {
-            Log.w(TAG, "failed to read calendar sync ids", t);
+            Log.w(TAG, "failed to read " + column + " from " + uri, t);
         } finally {
             if (cursor != null) {
                 cursor.close();
@@ -294,7 +302,6 @@ public final class FaceclawCalendarProvider {
                     attendee.put("type", cursor.isNull(3) ? "none" : attendeeTypeName(cursor.getInt(3)));
                     attendee.put("role", cursor.isNull(4) ? "none" : relationshipName(cursor.getInt(4)));
                     attendee.put("status", cursor.isNull(5) ? "none" : attendeeStatusName(cursor.getInt(5)));
-                    attendee.put("self", false);
                     long eventId = cursor.getLong(0);
                     JSONArray list = out.get(eventId);
                     if (list == null) {
@@ -312,18 +319,6 @@ public final class FaceclawCalendarProvider {
             }
         }
         return out;
-    }
-
-    /**
-     * Marks the attendee that is the calendar's owner (you). The provider has
-     * no "self" relationship, so match the calendar's owner account by email.
-     */
-    private static void markSelf(JSONArray attendees, String ownerAccount) throws JSONException {
-        for (int i = 0; i < attendees.length(); i++) {
-            JSONObject attendee = attendees.getJSONObject(i);
-            boolean self = !ownerAccount.isEmpty() && ownerAccount.equalsIgnoreCase(attendee.optString("email"));
-            attendee.put("self", self);
-        }
     }
 
     private static String inSelection(String column, int count) {

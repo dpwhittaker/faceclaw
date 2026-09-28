@@ -148,7 +148,6 @@ function normalizeEventDetails(value: any): CalendarEventDetails | null {
           type: oneOf(attendee.type, ATTENDEE_TYPES, "none"),
           role: oneOf(attendee.role, ATTENDEE_ROLES, "none"),
           status: oneOf(attendee.status, RESPONSES, "none"),
-          self: Boolean(attendee.self),
         }))
     : [];
   return {
@@ -163,6 +162,9 @@ function normalizeEventDetails(value: any): CalendarEventDetails | null {
     originalId: Number(value.originalId) || 0,
     originalSyncId: String(value.originalSyncId ?? ""),
     originalInstanceMs: Number(value.originalInstanceMs) || 0,
+    calendarId: Number(value.calendarId) || 0,
+    accountName: String(value.accountName ?? ""),
+    ownerAccount: String(value.ownerAccount ?? ""),
     attendees,
   };
 }

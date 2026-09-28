@@ -20,8 +20,6 @@ export type CalendarAttendee = {
   type: "required" | "optional" | "resource" | "none";
   role: "organizer" | "attendee" | "performer" | "speaker" | "none";
   status: CalendarResponse;
-  /** This attendee is the calendar's owner: you. */
-  self: boolean;
 };
 
 /**
@@ -32,7 +30,7 @@ export type CalendarEventDetails = CalendarEvent & {
   id: number;
   description: string;
   organizer: string;
-  /** Your response to the invitation. */
+  /** The response of the account the calendar syncs through: yours only if accountName is yours. */
   selfStatus: CalendarResponse;
   status: "confirmed" | "tentative" | "canceled";
   /** Part of a recurring series, including an occurrence moved or edited on its own. */
@@ -45,5 +43,11 @@ export type CalendarEventDetails = CalendarEvent & {
   originalSyncId: string;
   /** For an occurrence moved or edited on its own: when it was originally scheduled, else 0. */
   originalInstanceMs: number;
+  calendarId: number;
+  /** The account the calendar syncs through; a phone may sync several people's accounts. */
+  accountName: string;
+  /** The calendar's own address: an email, or a group-calendar id for a secondary calendar. */
+  ownerAccount: string;
+  /** Which attendee is you depends on your addresses; see apps/cue/calendar-context. */
   attendees: CalendarAttendee[];
 };

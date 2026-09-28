@@ -5,12 +5,15 @@ const {
   EARLY_JOIN_MS,
   currentEvent,
   eventsOnNow,
+  isYourEvent,
   occurrenceKey,
   seriesKey,
 } = require("../.test-build/app/apps/cue/calendar-context.js");
 
 const NOW = Date.UTC(2026, 8, 28, 15, 10); // Mon Sep 28 2026, 15:10 UTC
 const MIN = 60 * 1000;
+const ME = "me@example.com";
+const YOU = { emails: ["Me@Example.com"] };
 
 function event(overrides) {
   return {
@@ -20,7 +23,7 @@ function event(overrides) {
     endMs: NOW + 20 * MIN,
     allDay: false,
     location: "",
-    calendarName: "me@example.com",
+    calendarName: ME,
     description: "",
     organizer: "",
     selfStatus: "accepted",
@@ -30,13 +33,16 @@ function event(overrides) {
     originalId: 0,
     originalSyncId: "",
     originalInstanceMs: 0,
+    calendarId: 29,
+    accountName: ME,
+    ownerAccount: ME,
     attendees: [],
     ...overrides,
   };
 }
 
 function attendee(email, overrides = {}) {
-  return { name: email, email, type: "required", role: "attendee", status: "accepted", self: false, ...overrides };
+  return { name: email, email, type: "required", role: "attendee", status: "accepted", ...overrides };
 }
 
 test("a synced one-off event is keyed by its sync id", () => {
@@ -94,40 +100,85 @@ test("declined, canceled, all-day, ended and later events are not on now", () =>
     event({ id: 3, allDay: true }),
     event({ id: 4, endMs: NOW }),
     event({ id: 5, startMs: NOW + EARLY_JOIN_MS + 1, endMs: NOW + 60 * MIN }),
-    event({ id: 6, attendees: [attendee("me@example.com", { self: true, status: "declined" })] }),
+    event({ id: 6, attendees: [attendee(ME, { status: "declined" })] }),
   ];
-  assert.deepEqual(eventsOnNow(events, NOW), []);
-  assert.equal(currentEvent(events, NOW), null);
+  assert.deepEqual(eventsOnNow(events, NOW, YOU), []);
+  assert.equal(currentEvent(events, NOW, YOU), null);
 });
 
 test("a meeting starting within the early-join window is listed after ones under way", () => {
   const underWay = event({ id: 1 });
   const soon = event({ id: 2, startMs: NOW + 3 * MIN, endMs: NOW + 33 * MIN });
-  assert.deepEqual(eventsOnNow([soon, underWay], NOW).map((e) => e.id), [1, 2]);
+  assert.deepEqual(eventsOnNow([soon, underWay], NOW, YOU).map((e) => e.id), [1, 2]);
 });
 
 test("the meeting you're required at wins over one you're optional at", () => {
   const optional = event({
     id: 1,
     startMs: NOW - 2 * MIN,
-    attendees: [attendee("boss@example.com"), attendee("me@example.com", { self: true, type: "optional" })],
+    attendees: [attendee("boss@example.com"), attendee(ME, { type: "optional" })],
   });
   const required = event({
     id: 2,
     startMs: NOW - 8 * MIN,
-    attendees: [attendee("priya@example.com"), attendee("me@example.com", { self: true })],
+    attendees: [attendee("priya@example.com"), attendee(ME)],
   });
-  assert.equal(currentEvent([optional, required], NOW).id, 2);
+  assert.equal(currentEvent([optional, required], NOW, YOU).id, 2);
 });
 
 test("your own guest-free event counts as required; someone else's meeting does not", () => {
   const mine = event({ id: 1, title: "D&D", startMs: NOW - 30 * MIN });
   const notInvited = event({ id: 2, startMs: NOW - 5 * MIN, attendees: [attendee("lee@example.com")] });
-  assert.equal(currentEvent([notInvited, mine], NOW).id, 1);
+  assert.equal(currentEvent([notInvited, mine], NOW, YOU).id, 1);
 });
 
 test("among equals, the most recently started meeting wins over the block around it", () => {
   const block = event({ id: 1, startMs: NOW - 70 * MIN, endMs: NOW + 110 * MIN });
   const call = event({ id: 2, startMs: NOW - 5 * MIN, endMs: NOW + 25 * MIN });
-  assert.equal(currentEvent([block, call], NOW).id, 2);
+  assert.equal(currentEvent([block, call], NOW, YOU).id, 2);
+});
+
+// A phone that also syncs someone else's Google account, as David's does.
+const SPOUSE = "spouse@example.com";
+function theirs(overrides) {
+  return event({ calendarId: 24, accountName: SPOUSE, ownerAccount: SPOUSE, ...overrides });
+}
+
+test("events on another person's account are not yours, even with their own guest list", () => {
+  const girlsNight = theirs({
+    id: 1,
+    selfStatus: "accepted",
+    attendees: [attendee(SPOUSE, { role: "organizer" }), attendee("friend@example.com")],
+  });
+  const homeschoolClass = theirs({ id: 2 });
+  assert.equal(isYourEvent(girlsNight, YOU), false);
+  assert.equal(currentEvent([girlsNight, homeschoolClass], NOW, YOU), null);
+});
+
+test("an invitation on another account's calendar is yours, and your own response counts", () => {
+  const invited = theirs({ id: 1, attendees: [attendee(SPOUSE, { role: "organizer" }), attendee(ME)] });
+  assert.equal(currentEvent([invited], NOW, YOU).id, 1);
+  // Their calendar's response is theirs, not yours.
+  const theyDeclined = theirs({ id: 2, selfStatus: "declined", attendees: [attendee(SPOUSE, { status: "declined" }), attendee(ME)] });
+  assert.equal(currentEvent([theyDeclined], NOW, YOU).id, 2);
+  const youDeclined = theirs({ id: 3, attendees: [attendee(SPOUSE), attendee(ME, { status: "declined" })] });
+  assert.equal(currentEvent([youDeclined], NOW, YOU), null);
+});
+
+test("your calendar's own response counts when you're not on a guest list", () => {
+  assert.equal(currentEvent([event({ selfStatus: "declined" })], NOW, YOU), null);
+});
+
+test("chosen calendars replace the syncing-account rule", () => {
+  // A shared Family calendar that syncs through the other account.
+  const church = theirs({ id: 1, calendarId: 12, title: "Church" });
+  const mine = event({ id: 2 });
+  const scope = { emails: [ME], calendarIds: [12, 33] };
+  assert.equal(isYourEvent(church, scope), true);
+  assert.equal(isYourEvent(mine, scope), false);
+  assert.deepEqual(eventsOnNow([church, mine], NOW, scope).map((e) => e.id), [1]);
+});
+
+test("with no addresses configured, every event counts", () => {
+  assert.equal(isYourEvent(theirs({}), { emails: [] }), true);
 });
