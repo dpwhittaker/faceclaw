@@ -69,6 +69,7 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
     @Override
     public void onNotificationPosted(StatusBarNotification statusBarNotification) {
         super.onNotificationPosted(statusBarNotification);
+        FaceclawNotificationRecorder.record(this, statusBarNotification, "posted");
         if (!shouldShowNotificationInList(this, statusBarNotification)) {
             forgetActiveNotificationWakeKey(statusBarNotification);
             return;
@@ -80,6 +81,7 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
 
     @Override
     public void onNotificationRemoved(StatusBarNotification statusBarNotification) {
+        FaceclawNotificationRecorder.record(this, statusBarNotification, "removed");
         forgetActiveNotificationWakeKey(statusBarNotification);
         super.onNotificationRemoved(statusBarNotification);
     }

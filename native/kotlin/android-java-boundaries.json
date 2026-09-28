@@ -38,6 +38,7 @@
       "com/faceclaw/app/FaceclawMediaBrowser.java",
       "com/faceclaw/app/FaceclawMediaController.java",
       "com/faceclaw/app/FaceclawMediaNotificationListenerService.java",
+      "com/faceclaw/app/FaceclawNotificationRecorder.java",
       "com/faceclaw/app/FaceclawSystemStatusIconProvider.java",
       "com/faceclaw/app/FaceclawWearBridge.java",
       "com/faceclaw/app/FaceclawWearListenerService.java"
