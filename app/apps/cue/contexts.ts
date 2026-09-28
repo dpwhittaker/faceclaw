@@ -24,6 +24,7 @@ export const ASK_GRACE_MS = 2 * 60 * 1000;
 export const PAUSED_GRACE_MS = 30 * 60 * 1000;
 
 export type CuePerson = { personId: string; name: string };
+export type CueTeam = { teamId: string; name: string };
 
 export type CueContext = {
   /** Made on the phone; names the recording folder and the backend's context. */
@@ -33,8 +34,10 @@ export type CueContext = {
   event: CalendarEventDetails | null;
   /** Occurrence key of the event, "" for ad-hoc. */
   eventKey: string;
-  /** The people or team picked for an ad-hoc context; voices join later. */
+  /** The people picked for an ad-hoc context (a team's members, for a team); voices join later. */
   people: CuePerson[];
+  /** The team picked for an ad-hoc context, whose notebook and instructions apply. */
+  team: CueTeam | null;
   /** Stretches of this context; a resumed meeting has several. The last is open while current. */
   parts: { startMs: number; endMs: number | null }[];
   lastSpeechMs: number;
@@ -63,7 +66,7 @@ export type CueChange =
 export type CueSwitchTarget =
   | { type: "event"; event: CalendarEventDetails }
   | { type: "paused"; contextId: string }
-  | { type: "new"; people?: CuePerson[] };
+  | { type: "new"; people?: CuePerson[]; team?: CueTeam };
 
 export class CueContexts {
   private currentContext: CueContext | null = null;
@@ -104,9 +107,9 @@ export class CueContexts {
     if (eventNow && !this.endedEventKeys.has(key)) {
       const paused = this.pausedContexts.find((context) => context.eventKey === key);
       if (paused) return this.resume(paused, atMs);
-      return this.begin("scheduled", eventNow, [], atMs);
+      return this.begin("scheduled", eventNow, atMs);
     }
-    return this.begin("adhoc", null, [], atMs);
+    return this.begin("adhoc", null, atMs);
   }
 
   /** Time passing: silence and paused meetings running past their end. */
@@ -147,9 +150,9 @@ export class CueContexts {
       if (paused) return [...this.leaveCurrent(atMs), ...this.resume(paused, atMs)];
       // Picking an ended meeting again starts it afresh.
       this.endedEventKeys.delete(key);
-      return [...this.leaveCurrent(atMs), ...this.begin("scheduled", target.event, [], atMs)];
+      return [...this.leaveCurrent(atMs), ...this.begin("scheduled", target.event, atMs)];
     }
-    return [...this.leaveCurrent(atMs), ...this.begin("adhoc", null, target.people ?? [], atMs)];
+    return [...this.leaveCurrent(atMs), ...this.begin("adhoc", null, atMs, target.people ?? [], target.team ?? null)];
   }
 
   /** End the current context now: End conversation, "Meeting over early?" answered, or end_meeting. */
@@ -166,13 +169,20 @@ export class CueContexts {
     return changes;
   }
 
-  private begin(kind: CueContext["kind"], event: CalendarEventDetails | null, people: CuePerson[], atMs: number): CueChange[] {
+  private begin(
+    kind: CueContext["kind"],
+    event: CalendarEventDetails | null,
+    atMs: number,
+    people: CuePerson[] = [],
+    team: CueTeam | null = null,
+  ): CueChange[] {
     const context: CueContext = {
       id: this.newId(),
       kind,
       event,
       eventKey: event ? occurrenceKey(event) : "",
       people,
+      team,
       parts: [{ startMs: atMs, endMs: null }],
       lastSpeechMs: atMs,
     };

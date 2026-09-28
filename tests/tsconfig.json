@@ -47,6 +47,7 @@
     "../app/apps/teleprompter/script-tracker.ts",
     "../app/apps/nightscout/nightscout-alerts.ts",
     "../app/apps/cue/calendar-context.ts",
-    "../app/apps/cue/contexts.ts"
+    "../app/apps/cue/contexts.ts",
+    "../app/apps/cue/switch-choices.ts"
   ]
 }
