@@ -10,6 +10,7 @@ import nightscoutApp from "./nightscout";
 import transcribeApp from "./transcribe";
 import teleprompterApp from "./teleprompter";
 import microphonesApp from "./microphones";
+import cueApp from "./cue";
 import notificationsApp from "./notifications";
 import calendarApp from "./calendar";
 import weatherApp from "./weather";
@@ -43,6 +44,7 @@ export const ALL_APPS: readonly AppDefinition[] = [
   transcribeApp,
   teleprompterApp,
   microphonesApp,
+  cueApp,
   notificationsApp,
   calendarApp,
   weatherApp,

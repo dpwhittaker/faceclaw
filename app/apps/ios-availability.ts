@@ -3,6 +3,7 @@ const unavailable: Record<string, string> = {
   music: 'Media-player integration is not available on iOS yet.',
   transcribe: 'Voice capture and transcription are not available on iOS yet.',
   microphones: 'Glasses microphone capture is not available on iOS yet.',
+  cue: 'Cue runs on Android only.',
 }
 export function iosAppUnavailableReason(appId: string): string | null {
   return unavailable[appId] ?? null
