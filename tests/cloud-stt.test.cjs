@@ -193,3 +193,51 @@ test('an unsolicited Soniox session end finalizes visible text and reconnects', 
   assert.equal(h.sockets.length, 2);
   h.client.stop();
 });
+
+test('Soniox splits each transcript into speaker runs timed from when the audio was captured', () => {
+  const T0 = 1_790_000_000_000;
+  const h = harness('soniox');
+  h.client.acceptPcm(pcm(2000), T0); // buffered until the socket opens
+  h.open();
+  h.message({ tokens: [
+    { text: 'Hello', start_ms: 120, end_ms: 400, speaker: '1', is_final: true },
+    { text: ' there.', start_ms: 400, end_ms: 700, speaker: '1', is_final: true },
+    { text: ' Hi', start_ms: 900, end_ms: 1100, speaker: '2', is_final: false },
+  ] });
+  const partial = h.events.at(-1);
+  assert.equal(partial.isFinal, false);
+  assert.deepEqual(Array.from(partial.segments, s => [s.speaker, s.text, s.startMs - T0, s.endMs - T0]),
+    [['1', 'Hello there.', 120, 700], ['2', 'Hi', 900, 1100]]);
+  h.message({ tokens: [
+    { text: ' Hi,', start_ms: 900, end_ms: 1150, speaker: '2', is_final: true },
+    { text: ' Priya.', start_ms: 1150, end_ms: 1500, is_final: true }, // unlabelled: stays with speaker 2
+    { text: '<fin>', is_final: true },
+  ] });
+  const final = h.events.find(e => e.isFinal);
+  assert.deepEqual(Array.from(final.segments, s => [s.speaker, s.text, s.startMs - T0, s.endMs - T0]),
+    [['1', 'Hello there.', 120, 700], ['2', 'Hi, Priya.', 900, 1500]]);
+  // The next utterance starts from empty runs, on the same stream.
+  h.message({ tokens: [{ text: 'Next.', start_ms: 5000, end_ms: 5300, speaker: '1', is_final: false }] });
+  assert.deepEqual(Array.from(h.events.at(-1).segments, s => s.text), ['Next.']);
+  assert.equal(h.events.at(-1).segments[0].stream, final.segments[0].stream);
+  h.client.stop();
+});
+
+test('after a reconnect Soniox labels belong to a new stream, timed from the buffered audio', () => {
+  const T0 = 1_790_000_000_000;
+  const h = harness('soniox'); h.open();
+  h.client.acceptPcm(pcm(2000), T0);
+  h.message({ tokens: [{ text: 'Before.', start_ms: 0, end_ms: 300, speaker: '1', is_final: true }] });
+  const before = h.events.at(-1).segments[0];
+  h.sockets[0].listener.onFailure('offline');
+  // Audio captured during the outage reaches the new session late.
+  h.client.acceptPcm(pcm(2000), T0 + 60_000);
+  h.tick(); h.open();
+  h.message({ tokens: [{ text: 'After.', start_ms: 200, end_ms: 600, speaker: '1', is_final: true }, { text: '<fin>', is_final: true }] });
+  // The unconfirmed words before the outage were kept, with their speaker run.
+  assert.equal(h.events.filter(e => e.isFinal)[0].segments[0].text, 'Before.');
+  const after = h.events.filter(e => e.isFinal).at(-1).segments[0];
+  assert.notEqual(after.stream, before.stream);
+  assert.equal(after.startMs, T0 + 60_000 + 200);
+  h.client.stop();
+});

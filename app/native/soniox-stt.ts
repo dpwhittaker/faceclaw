@@ -1,5 +1,5 @@
 import { CLOUD_STT_SAMPLE_RATE, CloudSttClient, CloudSttOptions, toJavaBytes } from "./cloud-stt";
-import { TimedTranscript } from "./transcript-format";
+import { SpeakerRuns, TimedTranscript } from "./transcript-format";
 
 declare const com: any;
 
@@ -23,6 +23,9 @@ const MODEL_ID = "stt-rt-v5";
 
 export type SonioxSttOptions = CloudSttOptions;
 
+// Speaker labels restart with every session, so each client numbers its own.
+let nextStream = 1;
+
 export class SonioxSttClient implements CloudSttClient {
   private ws: any = null;
   private listenerProxy: any = null;
@@ -35,6 +38,12 @@ export class SonioxSttClient implements CloudSttClient {
   // Concatenation of all final tokens so far.
   private finalText = "";
   private formatted = new TimedTranscript();
+  // The same final tokens grouped by speaker, for diarized consumers (Cue).
+  private runs = new SpeakerRuns();
+  private readonly stream = nextStream++;
+  // When the first audio this session sent was captured: Soniox times every
+  // token from that first sample.
+  private audioOriginMs: number | null = null;
 
   constructor(private readonly options: SonioxSttOptions) {}
 
@@ -87,8 +96,9 @@ export class SonioxSttClient implements CloudSttClient {
   }
 
   /** Feed PCM (16 kHz signed-16-bit LE), as raw binary frames. */
-  acceptPcm(pcm: Uint8Array): void {
+  acceptPcm(pcm: Uint8Array, capturedAtMs = Date.now()): void {
     if (this.closed || pcm.length === 0) return;
+    this.audioOriginMs ??= capturedAtMs;
     if (this.open) {
       this.sendPcm(pcm);
     } else {
@@ -162,34 +172,49 @@ export class SonioxSttClient implements CloudSttClient {
     const tokens = Array.isArray(message?.tokens) ? message.tokens : [];
     let nonFinal = "";
     let preview: TimedTranscript | null = null;
+    let previewRuns: SpeakerRuns | null = null;
     for (const token of tokens) {
       const tokenText = String(token?.text ?? "");
       // Markers emitted by endpoint detection / manual finalize; not speech.
       if (tokenText === "<end>" || tokenText === "<fin>") {
         if (token?.is_final && this.finalText) {
-          this.options.onTranscript({ text: this.finalText, transcribeText: this.formatted.text, isFinal: true, paragraphBreakAfter: true });
+          this.options.onTranscript({
+            text: this.finalText, transcribeText: this.formatted.text, isFinal: true, paragraphBreakAfter: true,
+            segments: this.segments(this.runs),
+          });
           this.finalText = "";
           this.formatted = new TimedTranscript();
+          this.runs = new SpeakerRuns();
         }
         continue;
       }
       if (token?.is_final) {
         this.finalText += tokenText;
         this.formatted.append({ ...token, text: tokenText });
+        this.runs.append({ ...token, text: tokenText });
       } else {
         nonFinal += tokenText;
         preview ??= this.formatted.copy();
         preview.append({ ...token, text: tokenText });
+        previewRuns ??= this.runs.copy();
+        previewRuns.append({ ...token, text: tokenText });
       }
     }
     if (message?.finished) {
-      this.options.onTranscript({ text: this.finalText, transcribeText: this.formatted.text, isFinal: true });
+      this.options.onTranscript({ text: this.finalText, transcribeText: this.formatted.text, isFinal: true, segments: this.segments(this.runs) });
       if (this.finishing) this.stop();
       else this.options.onDisconnected?.("Soniox session ended; restarting transcription.");
       return;
     }
     if (tokens.length > 0) {
-      this.options.onTranscript({ text: this.finalText + nonFinal, transcribeText: (preview ?? this.formatted).text, isFinal: false });
+      this.options.onTranscript({
+        text: this.finalText + nonFinal, transcribeText: (preview ?? this.formatted).text, isFinal: false,
+        segments: this.segments(previewRuns ?? this.runs),
+      });
     }
+  }
+
+  private segments(runs: SpeakerRuns) {
+    return runs.segments(this.audioOriginMs ?? Date.now(), this.stream);
   }
 }

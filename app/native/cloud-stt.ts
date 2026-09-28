@@ -1,3 +1,5 @@
+import type { SpeakerSegment } from "./transcript-format";
+
 /**
  * Shared shape for the cloud speech-to-text providers (ElevenLabs, Whisper,
  * Soniox).
@@ -12,6 +14,12 @@ export type CloudSttTranscriptEvent = {
   /** Optional presentation for Transcribe only; dictation uses plain text. */
   transcribeText?: string;
   paragraphBreakAfter?: boolean;
+  /**
+   * The same words split into runs of one speaker, from providers that
+   * diarize (Soniox). Covers exactly this event's text: on a partial, the
+   * words so far including unconfirmed ones.
+   */
+  segments?: SpeakerSegment[];
 };
 
 export type CloudSttOptions = {
@@ -26,8 +34,12 @@ export type CloudSttOptions = {
 export interface CloudSttClient {
   /** Open whatever the provider needs before audio arrives. */
   start(): void;
-  /** Feed PCM (16 kHz signed-16-bit LE). */
-  acceptPcm(pcm: Uint8Array): void;
+  /**
+   * Feed PCM (16 kHz signed-16-bit LE). capturedAtMs (epoch ms, default now)
+   * is when the chunk was recorded, which differs from now for audio buffered
+   * across a reconnect; segment times are anchored to it.
+   */
+  acceptPcm(pcm: Uint8Array, capturedAtMs?: number): void;
   /** End of utterance: produce a final transcript. */
   finish(): void;
   /** Commit a pause boundary while keeping the audio session open. */

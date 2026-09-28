@@ -15,7 +15,9 @@ export class ReconnectingSttClient implements CloudSttClient {
   private retry: ReturnType<typeof setTimeout> | null = null;
   private finishTimeout: ReturnType<typeof setTimeout> | null = null;
   private attempt = 0;
-  private pending: Uint8Array[] = [];
+  // Unsent audio with the time each chunk was captured, so the provider can
+  // time words correctly even though they reach it after a reconnect.
+  private pending: { pcm: Uint8Array; capturedAtMs: number }[] = [];
   private pendingBytes = 0;
   private latest: CloudSttTranscriptEvent | null = null;
   private readonly pause = new SpeechPauseDetector();
@@ -38,7 +40,7 @@ export class ReconnectingSttClient implements CloudSttClient {
         const chunks = this.pending;
         this.pending = [];
         this.pendingBytes = 0;
-        for (const chunk of chunks) this.acceptPcm(chunk);
+        for (const chunk of chunks) this.acceptPcm(chunk.pcm, chunk.capturedAtMs);
         if (this.finishing) this.client?.finish();
       },
       onTranscript: (event) => {
@@ -65,19 +67,19 @@ export class ReconnectingSttClient implements CloudSttClient {
     }
   }
 
-  acceptPcm(pcm: Uint8Array): void {
+  acceptPcm(pcm: Uint8Array, capturedAtMs = Date.now()): void {
     if (this.stopped || !pcm.length) return;
     if (!this.ready) {
       const copy = pcm.slice(-MAX_PENDING_BYTES);
-      this.pending.push(copy);
+      this.pending.push({ pcm: copy, capturedAtMs });
       this.pendingBytes += copy.length;
-      while (this.pendingBytes > MAX_PENDING_BYTES) this.pendingBytes -= this.pending.shift()!.length;
+      while (this.pendingBytes > MAX_PENDING_BYTES) this.pendingBytes -= this.pending.shift()!.pcm.length;
       return;
     }
-    this.client?.acceptPcm(pcm);
+    this.client?.acceptPcm(pcm, capturedAtMs);
     // A rejected send synchronously reports disconnection. Keep that packet
     // with the unsent audio instead of losing it at the outage boundary.
-    if (!this.ready && !this.stopped) this.acceptPcm(pcm);
+    if (!this.ready && !this.stopped) this.acceptPcm(pcm, capturedAtMs);
     if (this.ready && !this.finishing && this.continuous() && this.pause.accept(pcm)) this.client?.commitSegment?.();
   }
 
