@@ -1,7 +1,7 @@
 import { GrayImage, imageFromAsciiArt, type UiFont } from "../../graphics/image";
 import { getDefaultSmallFont } from "../../graphics/ui-fonts";
 import { truncateText, wrapText } from "../../graphics/textwrap";
-import { textSettingMenuItem } from "../../ui/dashboard-settings";
+import { enumSettingMenuItem, textSettingMenuItem } from "../../ui/dashboard-settings";
 import {
   GESTURE_CLICK,
   GESTURE_DOUBLE_CLICK,
@@ -11,7 +11,7 @@ import {
   type InputEvent,
 } from "../../ui/gestures";
 import { type Layer, type LayerContext } from "../../ui/layers";
-import { MenuLayer, drawRightValueMenuItem, type MenuItem } from "../../ui/menu";
+import { MenuLayer, drawRightValueMenuItem, drawSelectionHighlight, type MenuItem } from "../../ui/menu";
 import { lineStep } from "../../ui/metrics";
 import { appViewportSize } from "../../ui/shell/geometry";
 import {
@@ -24,7 +24,9 @@ import { shell } from "../../ui/shell/shell";
 import { formatRelativeTime } from "../../util/date-util";
 import type { CueContext } from "./contexts";
 import { cueSession, type CueCaption, type CueState } from "./cue-session";
-import { cueEmailsSetting } from "./cue-settings";
+import { cueBackendTokenSetting, cueBackendUrlSetting, cueEmailsSetting, cueOrgSetting } from "./cue-settings";
+import { androidCueTransport } from "./cue-transport";
+import type { CueListItem } from "./cue-channel";
 
 export const CUE_WINDOW_ID = "cue";
 export const CUE_SURFACE_ID = "window:cue";
@@ -70,13 +72,15 @@ function contextLabel(context: CueContext): string {
 }
 
 /**
- * Cue's main view: who's talking and in which context, then the cues for it.
- * Cues come from the backend (not connected yet), so for now the body says
- * what Cue is doing. A click answers "Meeting over early?".
+ * Cue's main view: who's talking and in which context, then the backend's
+ * cues for it. Scroll selects, a click opens the selected cue; while
+ * "Meeting over early?" is up it's the first row, and a click on it ends the
+ * meeting.
  */
 class CueMainLayer implements Layer {
   private state: CueState = cueSession.state();
   private unsubscribe: (() => void) | null = null;
+  private selected = 0;
 
   start(requestRender: () => void): void {
     this.unsubscribe = cueSession.onState((state) => {
@@ -85,12 +89,21 @@ class CueMainLayer implements Layer {
     });
   }
 
+  /** Selectable rows: the question when it's up, then the cues. */
+  private rows(): ({ kind: "ask" } | { kind: "item"; item: CueListItem })[] {
+    return [
+      ...(this.state.askingEnded ? [{ kind: "ask" as const }] : []),
+      ...this.state.items.map((item) => ({ kind: "item" as const, item })),
+    ];
+  }
+
   paint(ctx: LayerContext): GrayImage {
     const font = getDefaultSmallFont();
     const { width, height } = ctx.stack.getBaseSize();
     const image = new GrayImage(width, height, 0);
     const state = this.state;
     const step = lineStep(font) + 1;
+    const rowHeight = step + 3;
     const textWidth = width - 24;
     let y = 4;
 
@@ -99,35 +112,120 @@ class CueMainLayer implements Layer {
     image.drawText(font, 12, y, truncateText(font, top, textWidth), 235);
     y += step + 2;
 
-    if (!state.listening) {
-      image.drawText(font, 12, y, truncateText(font, state.status, textWidth), 120);
+    const problem = !state.listening ? state.status : state.backend !== "connected" ? state.backendDetail : "";
+    if (problem) {
+      image.drawText(font, 12, y, truncateText(font, problem, textWidth), 120);
       y += step;
-    }
-    if (state.askingEnded) {
-      image.fillRoundedRect(8, y - 2, width - 16, step + 2, 60, 3);
-      image.drawText(font, 12, y, truncateText(font, `Meeting over early?   ${GESTURE_CLICK} end it`, textWidth), 255);
-      y += step + 4;
     }
 
-    const body = current
-      ? "No cues yet: they need Cue's backend, which isn't connected."
-      : "Not in a conversation. Talking starts one: the meeting on now, or an ad-hoc chat.";
-    for (const line of wrapText(font, body, textWidth)) {
-      image.drawText(font, 12, y, line, 150);
-      y += step;
+    const rows = this.rows();
+    this.selected = Math.max(0, Math.min(this.selected, rows.length - 1));
+    const footerY = height - font.lineHeight - 4;
+    const visible = Math.max(1, Math.floor((footerY - y - 2) / rowHeight));
+    const first = Math.max(0, Math.min(this.selected - visible + 1, rows.length - visible));
+    rows.slice(first, first + visible).forEach((row, index) => {
+      const rowY = y + index * rowHeight;
+      const selected = first + index === this.selected;
+      if (selected) drawSelectionHighlight(image, 8, rowY - 2, width - 16, rowHeight, true, 4);
+      const text = row.kind === "ask"
+        ? `Meeting over early?   ${GESTURE_CLICK} end it`
+        : `${row.item.label ? `${row.item.label} · ` : ""}${row.item.title}`;
+      image.drawText(font, 12, rowY, truncateText(font, text, textWidth), selected ? 255 : row.kind === "ask" ? 235 : 200);
+    });
+    if (!rows.length) {
+      const body = current
+        ? state.backend === "connected" ? "No cues yet." : "Cues appear once Cue's backend is reachable."
+        : "Not in a conversation. Talking starts one: the meeting on now, or an ad-hoc chat.";
+      for (const line of wrapText(font, body, textWidth)) {
+        image.drawText(font, 12, y, line, 150);
+        y += step;
+      }
     }
-    if (state.paused.length) {
+    if (state.paused.length && rows.length < visible) {
       const paused = state.paused.map((context) => contextLabel(context)).join(", ");
-      image.drawText(font, 12, y + 2, truncateText(font, `Paused: ${paused}`, textWidth), 120);
+      image.drawText(font, 12, footerY - step, truncateText(font, `Paused: ${paused}`, textWidth), 110);
     }
 
-    const footer = gestureHints([[GESTURE_SHORT_THEN_LONG_PRESS, "menu"], [GESTURE_DOUBLE_CLICK, "back"]]);
-    image.drawText(font, 12, height - font.lineHeight - 4, footer, 110);
+    const footer = gestureHints([[GESTURE_SCROLL, "select"], [GESTURE_CLICK, "open"], [GESTURE_SHORT_THEN_LONG_PRESS, "menu"]]);
+    image.drawText(font, 12, footerY, footer, 110);
     return image;
   }
 
-  handleInput(event: InputEvent): void {
-    if (event.type === "click" && this.state.askingEnded) cueSession.endCurrent();
+  handleInput(event: InputEvent, ctx: LayerContext): void {
+    const rows = this.rows();
+    if (event.type === "scroll-up") this.selected = Math.max(0, this.selected - 1);
+    else if (event.type === "scroll-down") this.selected = Math.min(Math.max(0, rows.length - 1), this.selected + 1);
+    else if (event.type === "click") {
+      const row = rows[this.selected];
+      if (row?.kind === "ask") cueSession.endCurrent();
+      else if (row?.kind === "item") {
+        const layer = new CueItemLayer(row.item);
+        ctx.stack.push(layer);
+        layer.start(ctx.actions.requestRender);
+      }
+    }
+  }
+
+  onRemoved(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+  }
+}
+
+/**
+ * One cue: its title, label and detail, then what you asked about it and
+ * the answer as it streams in. A click asks for more.
+ */
+class CueItemLayer implements Layer {
+  private state: CueState = cueSession.state();
+  private unsubscribe: (() => void) | null = null;
+  private scroll = 0;
+
+  constructor(private item: CueListItem) {}
+
+  start(requestRender: () => void): void {
+    this.unsubscribe = cueSession.onState((state) => {
+      this.state = state;
+      this.item = state.items.find((item) => item.id === this.item.id) ?? this.item;
+      requestRender();
+    });
+  }
+
+  paint(ctx: LayerContext): GrayImage {
+    const font = getDefaultSmallFont();
+    const { width, height } = ctx.stack.getBaseSize();
+    const image = new GrayImage(width, height, 0);
+    const step = lineStep(font) + 1;
+    const textWidth = width - 24;
+    const rows: { text: string; value: number }[] = [];
+    for (const line of wrapText(font, this.item.title, textWidth)) rows.push({ text: line, value: 245 });
+    if (this.item.label) rows.push({ text: this.item.label, value: 130 });
+    if (!this.state.items.some((item) => item.id === this.item.id)) rows.push({ text: "(No longer in the list.)", value: 120 });
+    rows.push({ text: "", value: 0 });
+    for (const line of wrapText(font, this.item.detail || "(No detail.)", textWidth)) rows.push({ text: line, value: 200 });
+    for (const answer of this.state.answers.values()) {
+      if (answer.itemId !== this.item.id) continue;
+      rows.push({ text: "", value: 0 });
+      rows.push({ text: `You asked: ${answer.question}`, value: 130 });
+      for (const line of wrapText(font, answer.text || "...", textWidth)) rows.push({ text: line, value: answer.done ? 220 : 170 });
+    }
+    const footerY = height - font.lineHeight - 4;
+    const visible = Math.max(1, Math.floor((footerY - 6) / step));
+    this.scroll = Math.max(0, Math.min(this.scroll, rows.length - visible));
+    rows.slice(this.scroll, this.scroll + visible).forEach((row, index) => image.drawText(font, 12, 4 + index * step, row.text, row.value));
+    const footer = gestureHints([[GESTURE_CLICK, "ask more"], [GESTURE_SCROLL, "scroll"], [GESTURE_DOUBLE_CLICK, "back"]]);
+    image.drawText(font, 12, footerY, footer, 110);
+    return image;
+  }
+
+  handleInput(event: InputEvent, ctx: LayerContext): void {
+    if (event.type === "scroll-up") this.scroll = Math.max(0, this.scroll - 1);
+    else if (event.type === "scroll-down") this.scroll += 1;
+    else if (event.type === "double-click") ctx.stack.pop();
+    else if (event.type === "click") {
+      cueSession.ask(this.item.id, "Tell me more.");
+      this.scroll = Number.MAX_SAFE_INTEGER;
+    }
   }
 
   onRemoved(): void {
@@ -261,7 +359,22 @@ function menuItems(): MenuItem[] {
         ctx.stack.clearToBase();
       },
     },
-    textSettingMenuItem(cueEmailsSetting),
+    {
+      label: "Settings",
+      onSelect: (ctx) =>
+        ctx.stack.push(
+          new MenuLayer(
+            "Cue settings",
+            [
+              textSettingMenuItem(cueEmailsSetting),
+              enumSettingMenuItem(cueOrgSetting),
+              textSettingMenuItem(cueBackendUrlSetting),
+              textSettingMenuItem(cueBackendTokenSetting),
+            ],
+            MENU_LAYOUT,
+          ),
+        ),
+    },
   ];
 }
 
@@ -271,11 +384,13 @@ function menuItems(): MenuItem[] {
  */
 export function createCueAppWindow(options: InProcessAppOptions): InProcessWindow {
   const layer = new CueMainLayer();
-  let listening: boolean | null = null;
+  // Bright while Cue listens and reaches its backend; dim otherwise.
+  let healthy: boolean | null = null;
   const unsubscribeTray = cueSession.onState((state) => {
-    if (state.listening === listening) return;
-    listening = state.listening;
-    shell.setTrayIcon(TRAY_ICON_ID, listening ? TRAY_ICON : TRAY_ICON_DIM);
+    const now = state.listening && state.backend === "connected";
+    if (now === healthy) return;
+    healthy = now;
+    shell.setTrayIcon(TRAY_ICON_ID, healthy ? TRAY_ICON : TRAY_ICON_DIM);
   });
   const app = createInProcessWindow({
     appId: "cue",
@@ -299,6 +414,6 @@ export function createCueAppWindow(options: InProcessAppOptions): InProcessWindo
     },
   });
   layer.start(app.requestRender);
-  cueSession.start(options.actions);
+  cueSession.start(options.actions, androidCueTransport);
   return app;
 }
