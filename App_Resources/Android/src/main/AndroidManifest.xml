@@ -37,6 +37,9 @@
 	<uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
 	<uses-permission android:name="android.permission.READ_CALENDAR"/>
+	<uses-permission android:name="android.permission.WRITE_CALENDAR" />
+	<!-- Cue starts its backend in Termux (needs allow-external-apps in termux.properties). -->
+	<uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 	<uses-permission android:name="android.permission.RECORD_AUDIO"/>
 	<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>

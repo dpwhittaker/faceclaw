@@ -1,6 +1,7 @@
 package com.faceclaw.app;
 
 import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
@@ -196,6 +197,97 @@ public final class FaceclawCalendarProvider {
             out.put(event);
         }
         return out.toString();
+    }
+
+    /**
+     * JSON array of calendars: id, name (display name), accountName,
+     * accountType, ownerAccount, accessLevel, visible. For finding the one
+     * Cue writes work meetings into.
+     */
+    public static String getCalendarsJson(Context context) {
+        if (context == null) {
+            return "[]";
+        }
+        String[] projection = {
+                CalendarContract.Calendars._ID,
+                CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
+                CalendarContract.Calendars.ACCOUNT_NAME,
+                CalendarContract.Calendars.ACCOUNT_TYPE,
+                CalendarContract.Calendars.OWNER_ACCOUNT,
+                CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,
+                CalendarContract.Calendars.VISIBLE,
+        };
+        JSONArray out = new JSONArray();
+        Cursor cursor = null;
+        try {
+            cursor = context.getContentResolver().query(CalendarContract.Calendars.CONTENT_URI, projection, null, null, null);
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    JSONObject calendar = new JSONObject();
+                    calendar.put("id", cursor.getLong(0));
+                    calendar.put("name", stringAt(cursor, 1));
+                    calendar.put("accountName", stringAt(cursor, 2));
+                    calendar.put("accountType", stringAt(cursor, 3));
+                    calendar.put("ownerAccount", stringAt(cursor, 4));
+                    calendar.put("accessLevel", cursor.isNull(5) ? 0 : cursor.getInt(5));
+                    calendar.put("visible", !cursor.isNull(6) && cursor.getInt(6) != 0);
+                    out.put(calendar);
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "failed to read calendars", t);
+            return "[]";
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+        return out.toString();
+    }
+
+    /**
+     * Adds an event to a calendar; the calendar's sync adapter (Google's)
+     * uploads it. Needs WRITE_CALENDAR. Returns the new event id, or -1.
+     */
+    public static long insertEvent(Context context, long calendarId, String title, long startMs, long endMs,
+                                   String location, String description, String timeZone) {
+        if (context == null) {
+            return -1L;
+        }
+        try {
+            ContentValues values = new ContentValues();
+            values.put(CalendarContract.Events.CALENDAR_ID, calendarId);
+            values.put(CalendarContract.Events.TITLE, title);
+            values.put(CalendarContract.Events.DTSTART, startMs);
+            values.put(CalendarContract.Events.DTEND, endMs);
+            values.put(CalendarContract.Events.EVENT_TIMEZONE, timeZone);
+            values.put(CalendarContract.Events.EVENT_LOCATION, location == null ? "" : location);
+            values.put(CalendarContract.Events.DESCRIPTION, description == null ? "" : description);
+            Uri uri = context.getContentResolver().insert(CalendarContract.Events.CONTENT_URI, values);
+            return uri == null ? -1L : ContentUris.parseId(uri);
+        } catch (Throwable t) {
+            Log.w(TAG, "failed to add calendar event", t);
+            return -1L;
+        }
+    }
+
+    /** Moves an event (a rescheduled meeting) and refreshes its title and location. Returns whether it changed. */
+    public static boolean updateEvent(Context context, long eventId, String title, long startMs, long endMs, String location) {
+        if (context == null) {
+            return false;
+        }
+        try {
+            ContentValues values = new ContentValues();
+            values.put(CalendarContract.Events.TITLE, title);
+            values.put(CalendarContract.Events.DTSTART, startMs);
+            values.put(CalendarContract.Events.DTEND, endMs);
+            values.put(CalendarContract.Events.EVENT_LOCATION, location == null ? "" : location);
+            Uri uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId);
+            return context.getContentResolver().update(uri, values, null, null) > 0;
+        } catch (Throwable t) {
+            Log.w(TAG, "failed to update calendar event", t);
+            return false;
+        }
     }
 
     private static Cursor queryInstances(Context context, long startMs, long endMs, String[] projection) {

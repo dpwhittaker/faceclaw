@@ -671,6 +671,25 @@ class Shell {
     this.config.requestShellRender();
   }
 
+  /**
+   * Show any layer in a shell modal over whatever app is in front (Cue's
+   * pop-ups). Wakes the screen if needed; the returned function closes the
+   * modal (and puts a screen it woke back to sleep). The layer gets every
+   * click and scroll while it's up, so it must call the closer itself.
+   */
+  openModal(layer: Layer): () => void {
+    const wokeScreen = this.screenOn ? false : this.wake("sidebar");
+    const modal = new ShellModalLayer(layer, this.config.actions);
+    this.stack.push(modal);
+    this.config.requestShellRender();
+    let closed = false;
+    return () => {
+      if (closed) return;
+      closed = true;
+      this.closeNotificationModal(modal, wokeScreen);
+    };
+  }
+
   private closeNotificationModal(modal: ShellModalLayer, wokeScreen: boolean): void {
     this.stack.popIfTop((layer) => layer === modal);
     if (wokeScreen) {

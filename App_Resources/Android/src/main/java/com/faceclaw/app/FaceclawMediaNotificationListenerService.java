@@ -74,6 +74,7 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
             forgetActiveNotificationWakeKey(statusBarNotification);
             return;
         }
+        FaceclawNotificationFeed.posted(this, statusBarNotification);
         if (shouldEmitNotificationPosted(statusBarNotification)) {
             emitNotificationPosted(statusBarNotification.getKey());
         }

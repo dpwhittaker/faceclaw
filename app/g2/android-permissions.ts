@@ -7,9 +7,12 @@ const LOCATION_PERMISSION_REQUEST_CODE = 4245;
 const FINE_LOCATION_PERMISSION_REQUEST_CODE = 4246;
 const BLE_ONLY_PERMISSION_REQUEST_CODE = 4247;
 const POST_NOTIFICATIONS_PERMISSION_REQUEST_CODE = 4248;
+const CUE_PERMISSION_REQUEST_CODE = 4249;
 const POST_NOTIFICATIONS_PERMISSION = "android.permission.POST_NOTIFICATIONS";
 const RECORD_AUDIO_PERMISSION = "android.permission.RECORD_AUDIO";
 const READ_CALENDAR_PERMISSION = "android.permission.READ_CALENDAR";
+const WRITE_CALENDAR_PERMISSION = "android.permission.WRITE_CALENDAR";
+const TERMUX_RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND";
 const ACCESS_COARSE_LOCATION_PERMISSION = "android.permission.ACCESS_COARSE_LOCATION";
 const ACCESS_FINE_LOCATION_PERMISSION = "android.permission.ACCESS_FINE_LOCATION";
 
@@ -190,6 +193,37 @@ export async function ensureCalendarPermission(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Whether Cue may add meetings to the calendar. */
+export function hasCalendarWritePermission(): boolean {
+  if (!global.isAndroid) return false;
+  return isPermissionGranted(WRITE_CALENDAR_PERMISSION);
+}
+
+/** Whether Cue may start its backend in Termux (Termux must be installed to grant it). */
+export function hasTermuxRunCommandPermission(): boolean {
+  if (!global.isAndroid) return false;
+  return isPermissionGranted(TERMUX_RUN_COMMAND_PERMISSION);
+}
+
+/**
+ * Asks once for what Cue needs: reading and writing the calendar (work
+ * meetings from Outlook notifications) and, if Termux is installed, running
+ * its backend there. Resolves whether calendar writing is held afterward.
+ */
+export async function ensureCuePermissions(termuxInstalled: boolean): Promise<boolean> {
+  if (!global.isAndroid) return false;
+  const wanted = [READ_CALENDAR_PERMISSION, WRITE_CALENDAR_PERMISSION, ...(termuxInstalled ? [TERMUX_RUN_COMMAND_PERMISSION] : [])];
+  const missing = wanted.filter((permission) => !isPermissionGranted(permission));
+  if (missing.length) {
+    try {
+      await ensurePermissions(missing, CUE_PERMISSION_REQUEST_CODE, "Cue");
+    } catch {
+      // Denied, or no activity to ask from; whatever was granted still counts.
+    }
+  }
+  return isPermissionGranted(WRITE_CALENDAR_PERMISSION);
 }
 
 /** Whether precise (GPS) foreground location access has been granted. */
