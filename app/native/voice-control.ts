@@ -453,6 +453,15 @@ export class FaceclawVoiceControlBridge {
     return this.captureHolders.has("continuous") || this.captureHolders.has("cue");
   }
 
+  /**
+   * Whether this holder has the mic, including across a session outage. A
+   * full stop (the glasses disconnecting) drops every holder, so an open-mic
+   * app checks this to ask again once the glasses are back.
+   */
+  isHeldBy(holder: CaptureHolder): boolean {
+    return this.captureHolders.has(holder) || this.suspendedHolders.has(holder);
+  }
+
   /** Whether anyone holds the mic, including across a session outage. */
   isCaptureHeld(): boolean {
     return this.captureHolders.size > 0 || this.suspendedHolders.size > 0;

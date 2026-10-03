@@ -23,6 +23,8 @@ const TICK_MS = 5_000;
 const CALENDAR_CACHE_MS = 30_000;
 const NOTIFY_INTERVAL_MS = 200;
 const ASK_CARD_ID = "cue:meeting-over";
+/** How often Cue asks for the mic again after losing it (the glasses reconnecting drops it). */
+const MIC_RETRY_MS = 10_000;
 
 export type CueCaption = { speaker: string; text: string; atMs: number; final: boolean };
 
@@ -69,6 +71,7 @@ class CueSession {
   private readonly items = new Map<string, CueListItem[]>();
   private readonly answers = new Map<string, CueAnswer>();
   private talking = "";
+  private micRequestedMs = 0;
 
   get running(): boolean {
     return this.actions !== null;
@@ -105,7 +108,8 @@ class CueSession {
         this.notify();
       }),
     ];
-    this.tickTimer = setInterval(() => this.apply(this.contexts.tick(Date.now())), TICK_MS);
+    this.tickTimer = setInterval(() => this.tick(), TICK_MS);
+    this.micRequestedMs = Date.now();
     void actions.startContinuousVoiceCapture("cue");
     this.notify();
   }
@@ -154,6 +158,18 @@ class CueSession {
 
   private recent(): CueRecent[] {
     return cueLink.recent.map((person) => ({ kind: "person", id: person.personId, name: person.name, lastTalkedMs: person.lastTalked }));
+  }
+
+  private tick(): void {
+    const nowMs = Date.now();
+    this.apply(this.contexts.tick(nowMs));
+    // A full voice stop (the glasses reconnecting after the charger, a dropped
+    // connection) releases Cue's mic hold; ask again until the glasses are back.
+    if (this.actions && !voiceControlBridge.isHeldBy("cue") && nowMs - this.micRequestedMs >= MIC_RETRY_MS) {
+      this.micRequestedMs = nowMs;
+      console.log("[Cue] microphone hold lost; asking again");
+      void this.actions.startContinuousVoiceCapture("cue");
+    }
   }
 
   /** What the Switch menu offers right now. */
