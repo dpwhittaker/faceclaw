@@ -42,6 +42,33 @@ export const cueBackendTokenSetting = new ConfigSettingString({
   normalize: (value) => (value ?? "").trim(),
 });
 
+/** The calendar Cue adds work meetings to (from Outlook invitations and reminders), by name. */
+export const cueWorkCalendarSetting = new ConfigSettingString({
+  id: "cue-work-calendar",
+  label: "Work calendar",
+  storageKey: "cue.workCalendar",
+  defaultValue: "Work",
+  editorTitle: "Calendar for work meetings (its name)",
+  glassesEditTitle: "Edit work calendar",
+  description: "Cue adds meetings from Outlook invitations and reminders to this calendar, on one of your own accounts.",
+  normalize: (value) => (value ?? "").trim(),
+});
+
+/**
+ * The script Termux runs to start Cue's backend when it doesn't answer;
+ * empty turns the supervision off. Only used for a backend on this phone.
+ */
+export const cueTermuxCommandSetting = new ConfigSettingString({
+  id: "cue-termux-command",
+  label: "Termux start script",
+  storageKey: "cue.termuxCommand",
+  defaultValue: "/data/data/com.termux/files/home/cue-backend/termux/start.sh",
+  editorTitle: "Termux script that starts Cue's backend",
+  glassesEditTitle: "Edit Termux script",
+  description: "Run in Termux when Cue's backend on this phone stops answering. Termux needs allow-external-apps = true.",
+  normalize: (value) => (value ?? "").trim(),
+});
+
 export const CUE_ORGS = ["work", "church", "theater"] as const;
 export type CueOrgChoice = "auto" | (typeof CUE_ORGS)[number];
 

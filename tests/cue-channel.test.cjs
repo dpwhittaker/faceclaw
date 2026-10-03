@@ -20,6 +20,8 @@ function harness() {
       onPopup: (popup) => events.popups.push(popup),
       onEndContext: (contextId, reason) => events.ends.push([contextId, reason]),
       onAnswer: (askId, text, done) => events.answers.push([askId, text, done]),
+      onTriage: (triage) => (events.triage ??= []).push(triage),
+      onNotebooks: (notebooks) => (events.notebooks ??= []).push(notebooks),
     },
     (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     () => {},
@@ -129,4 +131,30 @@ test("a failure followed by a close schedules one retry", () => {
   socket.handlers.onClose("failed");
   socket.handlers.onClose("closed");
   assert.equal(h.timers.length, 1);
+});
+
+test("notifications queue while offline, and triage and notebooks frames come back", () => {
+  const h = harness();
+  h.channel.start("ws://backend", "t", "s1", "");
+  h.channel.notification({ nid: "n1", package: "p", app: "App", profile: 0, postedMs: 1, title: "T", text: "x", bigText: "", subText: "", lines: [], messages: [] });
+  h.last().handlers.onOpen();
+  assert.deepEqual(h.types(), ["session-start", "notification"]);
+  h.channel.entry("work", "n:n1", "move", "todo");
+  h.channel.statusClear("work");
+  assert.deepEqual(h.last().sent.slice(-2).map((f) => [f.type, f.notebook, f.to]), [["entry", "work", "todo"], ["status-clear", "work", undefined]]);
+  h.reply({ type: "triage", nid: "n1", category: "urgent", notebook: "work", entryId: "n:n1", line: "L", title: "T", body: "B", app: "email" });
+  h.reply({ type: "notebooks", notebooks: [{ name: "work" }] });
+  assert.equal(h.events.triage[0].category, "urgent");
+  assert.equal(h.events.notebooks[0][0].name, "work");
+});
+
+test("retargeting starts a fresh session on the new backend and re-announces the context", () => {
+  const h = harness();
+  h.channel.start("ws://old", "t1", "s1", "work");
+  h.last().handlers.onOpen();
+  h.channel.switchTo(context);
+  h.channel.retarget("ws://new", "t2");
+  assert.equal(h.last().url, "ws://new");
+  h.last().handlers.onOpen();
+  assert.deepEqual(h.types(), ["session-start", "switch"]);
 });

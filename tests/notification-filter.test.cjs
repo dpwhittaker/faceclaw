@@ -160,8 +160,10 @@ test('controller filters before waking or opening a popup, and still refreshes t
   const handler = controller.members.find((node) => node.name?.getText(file) === 'handleAndroidNotificationPosted');
   const prefs = store();
   let wakes = 0, popups = 0, renders = 0;
+  const cue = { owns: false };
   const { Harness } = evaluate(`export class Harness { ${handler.getText(file)} }`, null, {
     ALL_NOTIFICATIONS: 0x7fffffff,
+    cueLink: { suppressesNotificationPopups: () => cue.owns },
     readActiveNotifications: () => [{ ...mail, key: 'key' }],
     shouldShowNotificationOnGlasses: prefs.shouldShowNotificationOnGlasses,
     shell: { isScreenOn: () => false, wake: () => { wakes++; return true; }, openNotificationModal: () => popups++ },
@@ -176,6 +178,11 @@ test('controller filters before waking or opening a popup, and still refreshes t
   assert.equal(popups, 0);
   assert.equal(renders, 2);
   prefs.setNotificationSourceEnabled(mail, true);
+  await instance.handleAndroidNotificationPosted('key');
+  assert.equal(wakes, 1);
+  assert.equal(popups, 1);
+  // While Cue triages notifications, it pops up the urgent ones itself.
+  cue.owns = true;
   await instance.handleAndroidNotificationPosted('key');
   assert.equal(wakes, 1);
   assert.equal(popups, 1);

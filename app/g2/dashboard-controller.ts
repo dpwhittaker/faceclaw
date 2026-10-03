@@ -50,6 +50,7 @@ import { type GlanceEvent } from "./glance-state";
 import { isWelcomeSoundPending, setWelcomeSoundPending } from "../phone-ui/onboarding-state";
 import { beginRenderPass, endRenderPass } from "../util/render-freshness";
 import { type ContinuousCaptureHolder, voiceControlBridge } from "../native/voice-control";
+import { cueLink } from "../apps/cue/cue-link";
 import { G2_LENS_HEIGHT, G2_LENS_WIDTH, GrayImage } from "../graphics/image";
 import { flattenPlanesWithDraws, planesFingerprint, type Plane } from "../graphics/plane";
 import { prepareFrameDraws } from "../graphics/glyph-wire";
@@ -2545,6 +2546,11 @@ class DashboardController {
   }
 
   private async handleAndroidNotificationPosted(notificationKey: string): Promise<void> {
+    // Cue triages every notification and pops up only the urgent ones itself.
+    if (cueLink.suppressesNotificationPopups()) {
+      this.requestShellRender();
+      return;
+    }
     const notification = readActiveNotifications(ALL_NOTIFICATIONS).find((item) => item.key === notificationKey);
     if (!notification || !shouldShowNotificationOnGlasses(notification.packageName)) {
       this.requestShellRender();

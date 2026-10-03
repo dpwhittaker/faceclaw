@@ -39,6 +39,23 @@ export type CueSwitchFrame = {
 export type CueListItem = { id: string; rank: number; title: string; detail: string; label: string };
 export type CueRecentPerson = { personId: string; name: string; team: string; lastTalked: number };
 export type CuePopup = { id: string; title: string; lines: string[]; priority: string; seconds: number };
+/** A notification the backend's triage filed. */
+export type CueTriage = { nid: string; category: "urgent" | "todo" | "status"; notebook: string; entryId: string; line: string; title: string; body: string; app: string };
+
+/** A notification as the backend's triage takes it. */
+export type CueNotificationFrame = {
+  nid: string;
+  package: string;
+  app: string;
+  profile: number;
+  postedMs: number;
+  title: string;
+  text: string;
+  bigText: string;
+  subText: string;
+  lines: string[];
+  messages: { sender: string; text: string; time: number }[];
+};
 
 export type CueChannelEvents = {
   onStatus(status: CueChannelStatus, detail: string): void;
@@ -47,6 +64,9 @@ export type CueChannelEvents = {
   onPopup(popup: CuePopup): void;
   onEndContext(contextId: string, reason: string): void;
   onAnswer(askId: string, text: string, done: boolean): void;
+  onTriage(triage: CueTriage): void;
+  /** The backend's notebooks (the frame's `notebooks` array, as sent). */
+  onNotebooks(notebooks: unknown[]): void;
 };
 
 type Frame = { type: string; [key: string]: unknown };
@@ -125,6 +145,31 @@ export class CueChannel {
 
   ask(contextId: string, askId: string, itemId: string | undefined, text: string): void {
     this.enqueue({ type: "ask", contextId, askId, itemId, text });
+  }
+
+  notification(notification: CueNotificationFrame): void {
+    this.enqueue({ type: "notification", ...notification });
+  }
+
+  entry(notebook: string, entryId: string, action: "dismiss" | "move", to?: string): void {
+    this.enqueue({ type: "entry", notebook, entryId, action, to });
+  }
+
+  statusClear(notebook: string): void {
+    this.enqueue({ type: "status-clear", notebook });
+  }
+
+  /**
+   * Points the channel at another backend address or token, keeping what's
+   * waiting and the current context, which the new connection announces in
+   * a fresh session.
+   */
+  retarget(url: string, token: string): void {
+    if (!this.started) return;
+    Object.assign(this, { url, token, announced: false, attempt: 0 });
+    if (this.retry !== null) this.cancel(this.retry);
+    this.retry = null;
+    this.open();
   }
 
   private ready(): boolean {
@@ -212,6 +257,21 @@ export class CueChannel {
         return;
       case "answer":
         this.events.onAnswer(String(frame.askId), String(frame.text ?? ""), Boolean(frame.done));
+        return;
+      case "triage":
+        this.events.onTriage({
+          nid: String(frame.nid),
+          category: frame.category === "urgent" || frame.category === "todo" ? frame.category : "status",
+          notebook: String(frame.notebook ?? ""),
+          entryId: String(frame.entryId ?? ""),
+          line: String(frame.line ?? ""),
+          title: String(frame.title ?? ""),
+          body: String(frame.body ?? ""),
+          app: String(frame.app ?? ""),
+        });
+        return;
+      case "notebooks":
+        this.events.onNotebooks(Array.isArray(frame.notebooks) ? frame.notebooks : []);
         return;
       case "error":
         // A restarted backend has forgotten the session: start it again.

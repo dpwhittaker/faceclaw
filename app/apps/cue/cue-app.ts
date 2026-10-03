@@ -24,9 +24,11 @@ import { shell } from "../../ui/shell/shell";
 import { formatRelativeTime } from "../../util/date-util";
 import type { CueContext } from "./contexts";
 import { cueSession, type CueCaption, type CueState } from "./cue-session";
-import { cueBackendTokenSetting, cueBackendUrlSetting, cueEmailsSetting, cueOrgSetting } from "./cue-settings";
-import { androidCueTransport } from "./cue-transport";
+import { cueBackendTokenSetting, cueBackendUrlSetting, cueEmailsSetting, cueOrgSetting, cueTermuxCommandSetting, cueWorkCalendarSetting } from "./cue-settings";
 import type { CueListItem } from "./cue-channel";
+import { cueLink } from "./cue-link";
+import { EntryPopupLayer } from "./entry-layer";
+import { ENTRY_ICONS, dropTime, idleNotebookNames, idleRows, statusEntries, type IdleRow, type Notebook, type NotebookEntry } from "./notebook-view";
 
 export const CUE_WINDOW_ID = "cue";
 export const CUE_SURFACE_ID = "window:cue";
@@ -71,11 +73,23 @@ function contextLabel(context: CueContext): string {
   return "ad-hoc";
 }
 
+/** Opens an entry's pop-up in Cue's window; the chosen option goes to the backend. */
+function openEntry(ctx: LayerContext, notebook: Notebook, entry: NotebookEntry): void {
+  ctx.stack.push(new EntryPopupLayer(
+    cueLink.entryPopup(notebook, entry),
+    (option) => cueLink.act(notebook.name, entry, option),
+    () => ctx.stack.pop(),
+  ));
+}
+
+type MainRow = { kind: "ask" } | { kind: "item"; item: CueListItem } | { kind: "note"; row: IdleRow };
+
 /**
- * Cue's main view: who's talking and in which context, then the backend's
- * cues for it. Scroll selects, a click opens the selected cue; while
- * "Meeting over early?" is up it's the first row, and a click on it ends the
- * meeting.
+ * Cue's main view. In a conversation: who's talking and in which context,
+ * then the backend's cues for it; while "Meeting over early?" is up it's the
+ * first row, and a click on it ends the meeting. Between conversations: the
+ * notebooks (Work on weekdays 8-6, the others combined otherwise), then a
+ * line for the status messages. Scroll selects, a click opens.
  */
 class CueMainLayer implements Layer {
   private state: CueState = cueSession.state();
@@ -89,8 +103,12 @@ class CueMainLayer implements Layer {
     });
   }
 
-  /** Selectable rows: the question when it's up, then the cues. */
-  private rows(): ({ kind: "ask" } | { kind: "item"; item: CueListItem })[] {
+  /** Selectable rows: the question when it's up, then the cues; or, between conversations, the notebooks. */
+  private rows(): MainRow[] {
+    if (!this.state.current) {
+      const notebooks = cueLink.notebooks;
+      return idleRows(notebooks, idleNotebookNames(notebooks, Date.now())).map((row) => ({ kind: "note" as const, row }));
+    }
     return [
       ...(this.state.askingEnded ? [{ kind: "ask" as const }] : []),
       ...this.state.items.map((item) => ({ kind: "item" as const, item })),
@@ -108,7 +126,8 @@ class CueMainLayer implements Layer {
     let y = 4;
 
     const current = state.current;
-    const top = current ? [state.talking, contextLabel(current)].filter(Boolean).join(" · ") : "Cue";
+    const idleLabels = cueLink.notebooks.filter((notebook) => idleNotebookNames(cueLink.notebooks, Date.now()).includes(notebook.name)).map((notebook) => notebook.label);
+    const top = current ? [state.talking, contextLabel(current)].filter(Boolean).join(" · ") : `Cue${idleLabels.length ? ` · ${idleLabels.join(", ")}` : ""}`;
     image.drawText(font, 12, y, truncateText(font, top, textWidth), 235);
     y += step + 2;
 
@@ -129,13 +148,15 @@ class CueMainLayer implements Layer {
       if (selected) drawSelectionHighlight(image, 8, rowY - 2, width - 16, rowHeight, true, 4);
       const text = row.kind === "ask"
         ? `Meeting over early?   ${GESTURE_CLICK} end it`
+        : row.kind === "note" ? row.row.text
         : `${row.item.label ? `${row.item.label} · ` : ""}${row.item.title}`;
-      image.drawText(font, 12, rowY, truncateText(font, text, textWidth), selected ? 255 : row.kind === "ask" ? 235 : 200);
+      const value = selected ? 255 : row.kind === "ask" ? 235 : row.kind === "note" && row.row.kind === "status" ? 140 : 200;
+      image.drawText(font, 12, rowY, truncateText(font, text, textWidth), value);
     });
     if (!rows.length) {
       const body = current
         ? state.backend === "connected" ? "No cues yet." : "Cues appear once Cue's backend is reachable."
-        : "Not in a conversation. Talking starts one: the meeting on now, or an ad-hoc chat.";
+        : cueLink.notebooks.length ? "Nothing in the notebooks. Talking starts a conversation." : "Not in a conversation. Talking starts one: the meeting on now, or an ad-hoc chat.";
       for (const line of wrapText(font, body, textWidth)) {
         image.drawText(font, 12, y, line, 150);
         y += step;
@@ -158,7 +179,13 @@ class CueMainLayer implements Layer {
     else if (event.type === "click") {
       const row = rows[this.selected];
       if (row?.kind === "ask") cueSession.endCurrent();
-      else if (row?.kind === "item") {
+      else if (row?.kind === "note") {
+        if (row.row.kind === "entry") openEntry(ctx, row.row.notebook, row.row.entry);
+        else {
+          const names = idleNotebookNames(cueLink.notebooks, Date.now());
+          pushLayer(ctx, new NotebookListLayer("Status messages", () => statusRows(names)));
+        }
+      } else if (row?.kind === "item") {
         const layer = new CueItemLayer(row.item);
         ctx.stack.push(layer);
         layer.start(ctx.actions.requestRender);
@@ -226,6 +253,82 @@ class CueItemLayer implements Layer {
       cueSession.ask(this.item.id, "Tell me more.");
       this.scroll = Number.MAX_SAFE_INTEGER;
     }
+  }
+
+  onRemoved(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+  }
+}
+
+type ListRow = { text: string; value?: number; open: (ctx: LayerContext) => void };
+
+function pushLayer(ctx: LayerContext, layer: Layer & { start?(requestRender: () => void): void }): void {
+  ctx.stack.push(layer);
+  layer.start?.(ctx.actions.requestRender);
+}
+
+/** The status messages of some notebooks, with Dismiss all first. */
+function statusRows(names: string[]): ListRow[] {
+  const entries = statusEntries(cueLink.notebooks, names);
+  if (!entries.length) return [{ text: "No status messages.", value: 120, open: () => {} }];
+  return [
+    { text: "Dismiss all", value: 235, open: (ctx) => { cueLink.clearStatus(names); ctx.stack.pop(); } },
+    ...entries.map(({ notebook, entry }) => ({
+      text: `${ENTRY_ICONS.status} ${names.length > 1 ? `${notebook.label}: ` : ""}${dropTime(entry.text)}`,
+      open: (ctx: LayerContext) => openEntry(ctx, notebook, entry),
+    })),
+  ];
+}
+
+/** One notebook's entries and its status line. */
+function notebookRows(name: string): ListRow[] {
+  const rows = idleRows(cueLink.notebooks, [name]).map((row): ListRow => row.kind === "entry"
+    ? { text: row.text, open: (ctx) => openEntry(ctx, row.notebook, row.entry) }
+    : { text: row.text, value: 140, open: (ctx) => pushLayer(ctx, new NotebookListLayer("Status messages", () => statusRows([name]))) });
+  return rows.length ? rows : [{ text: "Empty.", value: 120, open: () => {} }];
+}
+
+/** A live list (the rows are read again on every paint, so actions show at once); click opens, double-click goes back. */
+class NotebookListLayer implements Layer {
+  private selected = 0;
+  private unsubscribe: (() => void) | null = null;
+
+  constructor(private readonly title: string, private readonly rows: () => ListRow[]) {}
+
+  start(requestRender: () => void): void {
+    this.unsubscribe = cueLink.onChange(requestRender);
+  }
+
+  paint(ctx: LayerContext): GrayImage {
+    const font = getDefaultSmallFont();
+    const { width, height } = ctx.stack.getBaseSize();
+    const image = new GrayImage(width, height, 0);
+    const step = lineStep(font) + 1;
+    const rowHeight = step + 3;
+    image.drawText(font, 12, 4, this.title, 235);
+    const rows = this.rows();
+    this.selected = Math.max(0, Math.min(this.selected, rows.length - 1));
+    const top = 4 + step + 4;
+    const footerY = height - font.lineHeight - 4;
+    const visible = Math.max(1, Math.floor((footerY - top - 2) / rowHeight));
+    const first = Math.max(0, Math.min(this.selected - visible + 1, rows.length - visible));
+    rows.slice(first, first + visible).forEach((row, index) => {
+      const y = top + index * rowHeight;
+      const selected = first + index === this.selected;
+      if (selected) drawSelectionHighlight(image, 8, y - 2, width - 16, rowHeight, true, 4);
+      image.drawText(font, 12, y, truncateText(font, row.text, width - 24), selected ? 255 : row.value ?? 200);
+    });
+    image.drawText(font, 12, footerY, gestureHints([[GESTURE_SCROLL, "select"], [GESTURE_CLICK, "open"], [GESTURE_DOUBLE_CLICK, "back"]]), 110);
+    return image;
+  }
+
+  handleInput(event: InputEvent, ctx: LayerContext): void {
+    const rows = this.rows();
+    if (event.type === "scroll-up") this.selected = Math.max(0, this.selected - 1);
+    else if (event.type === "scroll-down") this.selected = Math.min(rows.length - 1, this.selected + 1);
+    else if (event.type === "click") rows[this.selected]?.open(ctx);
+    else if (event.type === "double-click") ctx.stack.pop();
   }
 
   onRemoved(): void {
@@ -352,6 +455,18 @@ function menuItems(): MenuItem[] {
     },
     { label: "People", onSelect: (ctx) => ctx.stack.push(peopleMenu(cueSession.state())) },
     {
+      label: "Notebooks",
+      onSelect: (ctx) => ctx.stack.push(new MenuLayer(
+        "Notebooks",
+        (cueLink.notebooks.length ? cueLink.notebooks : []).map((notebook): MenuItem => ({
+          label: notebook.label,
+          onSelect: (inner) => pushLayer(inner, new NotebookListLayer(notebook.label, () => notebookRows(notebook.name))),
+          render: ({ image, x, y, width }) => drawRightValueMenuItem(image, getDefaultSmallFont(), x, y, width, notebook.label, `${notebook.entries.length} · ${notebook.statusCount} status`),
+        })).concat(cueLink.notebooks.length ? [] : [{ label: "Not loaded yet", disabled: true, onSelect: () => {} }]),
+        MENU_LAYOUT,
+      )),
+    },
+    {
       label: "End conversation",
       disabled: () => !cueSession.state().current,
       onSelect: (ctx) => {
@@ -368,8 +483,10 @@ function menuItems(): MenuItem[] {
             [
               textSettingMenuItem(cueEmailsSetting),
               enumSettingMenuItem(cueOrgSetting),
+              textSettingMenuItem(cueWorkCalendarSetting),
               textSettingMenuItem(cueBackendUrlSetting),
               textSettingMenuItem(cueBackendTokenSetting),
+              textSettingMenuItem(cueTermuxCommandSetting),
             ],
             MENU_LAYOUT,
           ),
@@ -414,6 +531,6 @@ export function createCueAppWindow(options: InProcessAppOptions): InProcessWindo
     },
   });
   layer.start(app.requestRender);
-  cueSession.start(options.actions, androidCueTransport);
+  cueSession.start(options.actions);
   return app;
 }

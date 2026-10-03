@@ -3,12 +3,12 @@ import type { CalendarEventDetails } from "../../native/calendar-types";
 import type { SpeakerSegment } from "../../native/transcript-format";
 import { voiceControlBridge, type VoiceControlState, type VoiceTranscriptEvent } from "../../native/voice-control";
 import { postAmbientCard, dismissAmbientCard } from "../../ui/shell/ambient-cards";
-import { onAnySettingChanged } from "../../ui/dashboard-settings";
 import type { LayerActions } from "../../ui/layers";
 import { currentEvent, eventsOnNow, EARLY_JOIN_MS, occurrenceKey, seriesKey } from "./calendar-context";
-import { CueChannel, type CueChannelStatus, type CueEventFrame, type CueListItem, type CueTransportFactory } from "./cue-channel";
+import { type CueChannelStatus, type CueEventFrame, type CueListItem } from "./cue-channel";
+import { cueLink } from "./cue-link";
 import { ASK_GRACE_MS, CueContexts, type CueChange, type CueContext, type CueSwitchTarget } from "./contexts";
-import { cueBackendTokenSetting, cueBackendUrlSetting, cueCalendarScope, cueOrgFor } from "./cue-settings";
+import { cueCalendarScope, cueOrgFor } from "./cue-settings";
 import { contextTitle, switchChoices, type CueRecent, type CueSwitchChoice } from "./switch-choices";
 
 /**
@@ -55,7 +55,6 @@ export type CueState = {
 
 class CueSession {
   private readonly contexts = new CueContexts(newId);
-  private channel: CueChannel | null = null;
   private actions: LayerActions | null = null;
   private unsubscribers: (() => void)[] = [];
   private tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -63,8 +62,6 @@ class CueSession {
   private readonly listeners = new Set<(state: CueState) => void>();
   private calendarCache: { atMs: number; events: CalendarEventDetails[] } | null = null;
   private captureState: VoiceControlState = { status: "Not listening.", listening: false, detail: "" };
-  private backend: CueChannelStatus = "offline";
-  private backendDetail = "";
   private captions: CueCaption[] = [];
   private partial: CueCaption[] = [];
   // Per context: voices by stream:label, numbered in the order first heard.
@@ -72,27 +69,16 @@ class CueSession {
   private readonly items = new Map<string, CueListItem[]>();
   private readonly answers = new Map<string, CueAnswer>();
   private talking = "";
-  private recent: CueRecent[] = [];
-  // The backend address and token the channel runs with, to notice edits.
-  private backendConfig = "";
 
   get running(): boolean {
     return this.actions !== null;
   }
 
-  start(actions: LayerActions, transport: CueTransportFactory): void {
+  /** The window opened: listen, and take the backend's conversation frames (the connection itself is cueLink's). */
+  start(actions: LayerActions): void {
     if (this.actions) return;
     this.actions = actions;
-    this.channel = new CueChannel(transport, {
-      onStatus: (status, detail) => {
-        this.backend = status;
-        this.backendDetail = detail;
-        this.notify();
-      },
-      onRecent: (recent) => {
-        this.recent = recent.map((person) => ({ kind: "person", id: person.personId, name: person.name, lastTalkedMs: person.lastTalked }));
-        this.notify();
-      },
+    cueLink.setConversationHandler({
       onList: (contextId, items) => {
         this.items.set(contextId, items);
         this.notify();
@@ -111,9 +97,8 @@ class CueSession {
         this.notify();
       },
     });
-    this.connectBackend();
     this.unsubscribers = [
-      onAnySettingChanged(() => this.connectBackend()),
+      cueLink.onChange(() => this.notify()),
       voiceControlBridge.onTranscript((event) => this.onTranscript(event)),
       voiceControlBridge.onStatus((state) => {
         this.captureState = state;
@@ -129,9 +114,7 @@ class CueSession {
     const actions = this.actions;
     if (!actions) return;
     this.apply(this.contexts.stop(Date.now()));
-    this.channel?.stop();
-    this.channel = null;
-    this.backendConfig = "";
+    cueLink.setConversationHandler(null);
     for (const unsubscribe of this.unsubscribers) unsubscribe();
     this.unsubscribers = [];
     if (this.tickTimer !== null) clearInterval(this.tickTimer);
@@ -140,27 +123,6 @@ class CueSession {
     void actions.stopContinuousVoiceCapture("cue");
     this.partial = [];
     this.notify();
-  }
-
-  /** (Re)connects when the backend address or token changed, re-announcing the current context. */
-  private connectBackend(): void {
-    const channel = this.channel;
-    if (!channel) return;
-    const url = cueBackendUrlSetting.get();
-    const token = cueBackendTokenSetting.get();
-    const config = `${url}\n${token}`;
-    if (config === this.backendConfig) return;
-    this.backendConfig = config;
-    if (!url || !token) {
-      channel.stop();
-      this.backendDetail = "Set Cue's backend address and token in the menu.";
-      this.notify();
-      return;
-    }
-    const nowMs = Date.now();
-    channel.start(url, token, newId(), cueOrgFor(null, nowMs));
-    const current = this.contexts.current;
-    if (current) channel.switchTo(switchFrame(current, nowMs));
   }
 
   onState(listener: (state: CueState) => void): () => void {
@@ -176,8 +138,8 @@ class CueSession {
       running: this.running,
       status: this.captureState.status,
       listening: this.captureState.listening,
-      backend: this.backend,
-      backendDetail: this.backendDetail,
+      backend: cueLink.backendStatus,
+      backendDetail: cueLink.backendDetail,
       current,
       paused: this.contexts.paused,
       askingEnded: this.contexts.askingEnded,
@@ -186,15 +148,19 @@ class CueSession {
       items: current ? this.items.get(current.id) ?? [] : [],
       captions: [...this.captions, ...this.partial],
       answers: this.answers,
-      recent: this.recent,
+      recent: this.recent(),
     };
+  }
+
+  private recent(): CueRecent[] {
+    return cueLink.recent.map((person) => ({ kind: "person", id: person.personId, name: person.name, lastTalkedMs: person.lastTalked }));
   }
 
   /** What the Switch menu offers right now. */
   switchChoices(formatTime: (ms: number) => string): CueSwitchChoice[] {
     const nowMs = Date.now();
     const state = this.state();
-    return switchChoices(eventsOnNow(this.calendar(nowMs), nowMs, cueCalendarScope()), state.paused, this.recent, state.current, nowMs, formatTime);
+    return switchChoices(eventsOnNow(this.calendar(nowMs), nowMs, cueCalendarScope()), state.paused, this.recent(), state.current, nowMs, formatTime);
   }
 
   switchTo(target: CueSwitchTarget): void {
@@ -209,10 +175,10 @@ class CueSession {
   /** Asks the backend about an item (or the conversation); returns the id its answer arrives under. */
   ask(itemId: string | undefined, question: string): string | null {
     const current = this.contexts.current;
-    if (!current || !this.channel) return null;
+    if (!current) return null;
     const askId = newId();
     this.answers.set(askId, { itemId, question, text: "", done: false });
-    this.channel.ask(current.id, askId, itemId, question);
+    cueLink.channel.ask(current.id, askId, itemId, question);
     this.notify();
     return askId;
   }
@@ -237,9 +203,9 @@ class CueSession {
       this.partial = [];
       if (current) {
         if (segments.length) {
-          for (const [index, segment] of segments.entries()) this.channel?.line(current.id, lines[index].speaker, segment.text, segment.startMs, segment.endMs);
+          for (const [index, segment] of segments.entries()) cueLink.channel.line(current.id, lines[index].speaker, segment.text, segment.startMs, segment.endMs);
         } else {
-          this.channel?.line(current.id, "", event.text.trim(), atMs, atMs);
+          cueLink.channel.line(current.id, "", event.text.trim(), atMs, atMs);
         }
       }
     } else {
@@ -283,18 +249,18 @@ class CueSession {
       console.log(`[Cue] ${change.type} ${context.id} ${contextTitle(context)}${change.type === "end" ? ` (${change.reason})` : ""}`);
       switch (change.type) {
         case "start":
-          this.channel?.switchTo(switchFrame(context, change.atMs));
+          cueLink.channel.switchTo(switchFrame(context, change.atMs));
           this.talking = "";
           break;
         case "resume":
-          this.channel?.switchTo({ atMs: change.atMs, contextId: context.id });
+          cueLink.channel.switchTo({ atMs: change.atMs, contextId: context.id });
           this.talking = "";
           break;
         case "pause":
           // The switch that follows tells the backend; a pause alone never happens.
           break;
         case "end":
-          this.channel?.contextEnd(context.id, change.atMs, change.reason);
+          cueLink.channel.contextEnd(context.id, change.atMs, change.reason);
           this.voices.delete(context.id);
           this.items.delete(context.id);
           this.talking = "";
