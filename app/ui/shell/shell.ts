@@ -19,6 +19,7 @@ import { Layer, LayerActions, LayerContext, LayerStack, noopLayerActions } from 
 import { CONTEXT_MENU_DIM, MenuLayer, type MenuItem } from "../menu";
 import { VoiceInputLayer, type VoiceSendTarget } from "./voice-input";
 import { KeyboardInputLayer, type KeyboardInputSession } from "./keyboard-input";
+import { TextInputLayer } from "./text-input";
 import { voiceActivity } from "./voice-activity";
 import { AssistantLayer } from "./assistant";
 import { AssistantSession, type AssistantBackendConfig } from "../../assistant/session";
@@ -66,10 +67,11 @@ import {
  * Input flow: every event enters via receiveInput. The shell consumes
  * everything while the sidebar or a shell overlay has focus and forwards the
  * rest to the focused window. Long-press opens the shell-owned system menu
- * (Focus app switcher, Voice input, Brightness, Close window, Debug) without reaching the
- * app, so the shell keeps working when a window's handler hangs; a window
- * that claims long-press for a move of its own gets it forwarded instead, and
- * holding the press past the escape threshold still opens the system menu.
+ * (Focus app switcher, Voice input, Text input, Brightness, Close window,
+ * Debug) without reaching the app, so the shell keeps working when a
+ * window's handler hangs; a window that claims long-press for a move of its
+ * own gets it forwarded instead, and holding the press past the escape
+ * threshold still opens the system menu.
  * The 2.2.9 tap-then-hold gesture goes to the foreground window (from the
  * sidebar it focuses the window first); by convention apps answer it with
  * their own context menu, or ask for the system menu when they have none.
@@ -325,6 +327,7 @@ class Shell {
   private readonly trayIcons = new Map<string, GrayImage>();
   private activeVoiceLayer: VoiceInputLayer | null = null;
   private activeKeyboardLayer: KeyboardInputLayer | null = null;
+  private activeTextLayer: TextInputLayer | null = null;
   private conversations: AssistantConversations | null = null;
   private get assistantSession(): AssistantSession | null {
     return this.conversations?.current().session ?? null;
@@ -644,7 +647,9 @@ class Shell {
     // ring. An in-flight assistant turn suspends it for the same reason (a
     // tool loop can run for a while with no input); once the turn ends and
     // the Follow-up/Done menu is showing, the normal idle timeout resumes.
-    if (this.activeVoiceLayer || this.activeKeyboardLayer || this.assistantSession?.isTurnActive() || this.foregroundWindow()?.isVoiceCapturing?.()) {
+    // The ring keyboard too: sleeping clears the overlays, and with them a
+    // message that took many gestures to type.
+    if (this.activeVoiceLayer || this.activeKeyboardLayer || this.activeTextLayer || this.assistantSession?.isTurnActive() || this.foregroundWindow()?.isVoiceCapturing?.()) {
       this.lastInputAtMs = nowMs;
       return false;
     }
@@ -806,6 +811,16 @@ class Shell {
       return { shell: false, window: false };
     }
 
+    // An overlay that claims the hold gestures (the ring keyboard) gets
+    // long-press and tap-then-hold in place of the menus below.
+    if (
+      (event.type === "long-press" || event.type === "short-then-long-press") &&
+      this.stack.topMatches((layer) => layer.acceptsHoldGestures === true)
+    ) {
+      await this.stack.handleInput(event);
+      return { shell: true, window: false };
+    }
+
     // Long-press is the shell's own gesture: it opens the system menu
     // directly, never reaching the app — over the app's own context menu
     // too (the window closes that on system-menu-opened), while an already
@@ -936,6 +951,7 @@ class Shell {
     if (!this.screenOn) return `fg=${foreground} target=screen-off`;
     if (this.activeVoiceLayer) return `fg=${foreground} target=voice`;
     if (this.activeKeyboardLayer) return `fg=${foreground} target=keyboard`;
+    if (this.activeTextLayer) return `fg=${foreground} target=text`;
     if (!this.stack.isAtBase()) return `fg=${foreground} target=shell-overlay`;
     return `fg=${foreground} target=${this.focus}`;
   }
@@ -1141,6 +1157,35 @@ class Shell {
     // entry point defaults the highlight to Type Into App.
     this.focus = "window";
     this.openVoiceDialog({ finishOnClick: true, defaultTarget: "app" });
+    this.config.requestShellRender();
+  }
+
+  /**
+   * Open the ring keyboard (see TextInputLayer) aimed at the foreground
+   * window. Called when the user picks Text input from the system menu; like
+   * Voice input from there, the menu highlights Type Into App.
+   */
+  startTextInput(): void {
+    if (!this.screenOn || this.activeVoiceLayer || this.activeTextLayer || !this.stack.isAtBase()) return;
+    this.focus = "window";
+    const targets = this.buildVoiceSendTargets();
+    const layer = new TextInputLayer({
+      actions: this.config.actions,
+      onClosed: () => {
+        if (this.activeTextLayer === layer) {
+          this.activeTextLayer = null;
+          // The idle countdown restarts in full once text input ends.
+          this.noteUserActivity();
+        }
+      },
+      dismiss: () => {
+        this.stack.popIfTop((top) => top === layer);
+      },
+      sendTargets: targets,
+      defaultTargetIndex: Math.max(0, targets.findIndex((target) => target.id === "app")),
+    });
+    this.activeTextLayer = layer;
+    this.stack.push(layer);
     this.config.requestShellRender();
   }
 
@@ -1435,9 +1480,9 @@ class Shell {
 
   /**
    * The system/escape menu: the entries every window shares (Focus app
-   * switcher, Voice input, Brightness, Close window) plus Debug. Shell-owned and
-   * shell-drawn (never the app's), so an unresponsive app can always be
-   * closed. It opens for long-press (over the app's own menu too), after an
+   * switcher, Voice input, Text input, Brightness, Close window) plus Debug.
+   * Shell-owned and shell-drawn (never the app's), so an unresponsive app
+   * can always be closed. It opens for long-press (over the app's own menu too), after an
    * extended hold in a window that claims long-press, and on a window's
    * request when tap-then-hold finds it has no menu of its own.
    */
@@ -1481,6 +1526,16 @@ class Shell {
           this.startVoiceInput();
         },
       }]),
+      {
+        label: "Text input",
+        onSelect: (ctx) => {
+          // Typed with the ring and aimed at the foreground window, like
+          // Voice input.
+          layer.keepWindowFocus = true;
+          ctx.stack.pop();
+          this.startTextInput();
+        },
+      },
     );
     if (brightnessSetting.get() !== "auto") {
       items.push({

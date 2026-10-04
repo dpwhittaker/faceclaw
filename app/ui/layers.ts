@@ -102,6 +102,12 @@ export interface Layer {
    */
   readonly acceptsDirectional?: boolean;
   /**
+   * True when handleInput gives long-press and tap-then-hold meanings of its
+   * own (the ring keyboard). The shell then delivers both to it while it is
+   * the top shell overlay, where it otherwise keeps them for its menus.
+   */
+  readonly acceptsHoldGestures?: boolean;
+  /**
    * A touch at (x, y) in this layer's own canvas coordinates, from the phone's
    * mirror view. Return true if the layer acted on it (selected / opened what
    * is there); false sends a plain select (click) instead.

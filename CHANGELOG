@@ -6,6 +6,7 @@
 
 * Add tokens and faceclaw-input script, which allows using a CLI utility as an input device for the glasses
 * Navigate app: Add map-without-destination mode
+* Text input in the system menu: type with the ring alone, on a keyboard that splits the characters into three boxes to zoom through
 
 ### iOS port:
 

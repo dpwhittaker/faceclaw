@@ -103,7 +103,7 @@ test('the thin bar fills upward in proportion to brightness in each viewport', (
   }
 });
 
-test('system menu hides brightness in Auto and opens its picker between Voice input and Debug', async () => {
+test('system menu hides brightness in Auto and opens its picker between Text input and Debug', async () => {
   const f = fixture('auto');
   const { shell } = load('app/ui/shell/shell.ts', {
     '../../graphics/image': graphics, '../layers': layers, '../menu': menu, '../gestures': gestures,
@@ -114,13 +114,14 @@ test('system menu hides brightness in Auto and opens its picker between Voice in
   shell.openSystemMenu('test');
   let opened = shell.stack.layers.at(-1);
   assert.deepEqual(Array.from(opened.items, (item) => item.label),
-    ['Close window', 'Focus app switcher', 'Voice input', 'Debug']);
+    ['Close window', 'Focus app switcher', 'Voice input', 'Text input', 'Debug']);
   shell.stack.clearToBase();
   f.settings.brightnessSetting.set('40');
   shell.openSystemMenu('test');
   opened = shell.stack.layers.at(-1);
   assert.deepEqual(Array.from(opened.items, (item) => item.label),
-    ['Close window', 'Focus app switcher', 'Voice input', 'Brightness', 'Debug']);
+    ['Close window', 'Focus app switcher', 'Voice input', 'Text input', 'Brightness', 'Debug']);
+  await shell.stack.handleInput(gestures.makeInputEvent({ type: 'scroll-down' }));
   await shell.stack.handleInput(gestures.makeInputEvent({ type: 'scroll-down' }));
   await shell.stack.handleInput(gestures.makeInputEvent({ type: 'scroll-down' }));
   await shell.stack.handleInput(gestures.makeInputEvent({ type: 'click', source: 'ring' }));

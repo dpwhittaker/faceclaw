@@ -66,6 +66,22 @@ test('press is observed before routing and does not wake, operate shell menus or
   }
 });
 
+test('an overlay that claims hold gestures gets long-press and tap-then-hold instead of the menus', async () => {
+  const { exports: { Shell } } = shellDeclarations();
+  for (const claims of [true, false]) for (const type of ['long-press', 'short-then-long-press']) {
+    const s = new Shell(), delivered = [], top = { acceptsHoldGestures: claims };
+    let menus = 0;
+    Object.assign(s, { screenOn: true, focus: 'window', lastInput: null, activeVoiceLayer: null,
+      stack: { isAtBase: () => false, topMatches: (match) => match(top), popIfTop: () => false,
+        handleInput: async (e) => { delivered.push(e.type); } },
+      foregroundWindow: () => ({ hasAppMenu: () => false, handleInput() { throw new Error('reached the window'); } }),
+      openEscapeMenu: () => { menus++; }, cancelEscapeMenuTimer() {}, syncInputFocus() {} });
+    assert.deepEqual({ ...await s.receiveInput(event(type)) }, { shell: true, window: false });
+    assert.deepEqual(delivered, claims ? [type] : [], `${type} claims=${claims}`);
+    assert.equal(menus, 0);
+  }
+});
+
 test('bounded history preserves equal-time events, snapshots and arrival gaps; pause and clear work', () => {
   const log = new monitor.InputEventLog();
   const first = event('ring-press'); log.add(first); first.type = 'unknown';

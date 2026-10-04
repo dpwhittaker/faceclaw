@@ -6,10 +6,10 @@ import { listRowHeight } from "../metrics";
 import { MIN_WINDOW_HEIGHT, minWindowTop } from "./geometry";
 
 /**
- * The shared look of the shell's text-entry dialogs (voice input and phone
- * keyboard input): a solid box over whatever is on screen with a title line,
- * a status line, the message so far, and either a menu of destinations at
- * the bottom or a gesture hint.
+ * The shared look of the shell's text-entry dialogs (voice input, phone
+ * keyboard input and the ring keyboard): a solid box over whatever is on
+ * screen with a title line, a status line, the message so far, and either a
+ * menu of destinations at the bottom or a gesture hint.
  */
 
 const DIALOG_X = 40;
@@ -23,6 +23,20 @@ const TEXT_MAX_WIDTH = DIALOG_W - 32;
 /** Dialog top edge; band-relative, so computed per paint. */
 function dialogY(): number {
   return minWindowTop() + DIALOG_MARGIN_Y;
+}
+
+/** The dialog box on screen, for dialogs that lay out their own content in it. */
+export function inputDialogRect(): { x: number; y: number; width: number; height: number } {
+  return { x: DIALOG_X, y: dialogY(), width: DIALOG_W, height: DIALOG_H };
+}
+
+/** Paint the empty dialog box over the underlying UI. */
+export function paintInputDialogBox(image: GrayImage): void {
+  const top = dialogY();
+  // Fill 1, not 0: identical after 4bpp quantization, but 0 is transparent
+  // on the color-key shell surface.
+  image.fillRoundedRect(DIALOG_X, top, DIALOG_W, DIALOG_H, 1, 10);
+  image.drawRoundedRect(DIALOG_X, top, DIALOG_W, DIALOG_H, 90, 10);
 }
 
 export type InputDialogRow = {
@@ -49,10 +63,7 @@ export function paintInputDialog(image: GrayImage, content: InputDialogContent):
   const menuRowH = listRowHeight(font);
   const top = dialogY();
 
-  // Solid dialog box over the underlying UI. Fill 1, not 0: identical after
-  // 4bpp quantization, but 0 is transparent on the color-key shell surface.
-  image.fillRoundedRect(DIALOG_X, top, DIALOG_W, DIALOG_H, 1, 10);
-  image.drawRoundedRect(DIALOG_X, top, DIALOG_W, DIALOG_H, 90, 10);
+  paintInputDialogBox(image);
 
   const left = DIALOG_X + 16;
   image.drawText(font, left, top + 12, content.title, 220);
