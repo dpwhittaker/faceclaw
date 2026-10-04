@@ -85,6 +85,9 @@ class CueSession {
   private readonly items = new Map<string, CueListItem[]>();
   private readonly answers = new Map<string, CueAnswer>();
   private talking = "";
+  private talkingAtMs = 0;
+  // The live transcription's stream per context: a new one restarts its voice numbers.
+  private readonly streams = new Map<string, number>();
   private micRequestedMs = 0;
   // Where the last microphone chunk ended, on the transcription's clock.
   private audioEndMs = 0;
@@ -177,11 +180,11 @@ class CueSession {
       current,
       paused: this.contexts.paused,
       askingEnded: this.contexts.askingEnded,
-      talking: current && this.talking ? this.displayName(current.id, this.talking) : "",
+      talking: current && this.talking ? this.displayName(current.id, this.talking, this.talkingAtMs) : "",
       talkingLabel: current ? this.talking : "",
       voices,
       items: current ? this.items.get(current.id) ?? [] : [],
-      captions: [...this.captions, ...this.partial].map((caption) => (caption.speaker ? { ...caption, speaker: this.displayName(caption.contextId, caption.speaker) } : caption)),
+      captions: [...this.captions, ...this.partial].map((caption) => (caption.speaker ? { ...caption, speaker: this.displayName(caption.contextId, caption.speaker, caption.atMs) } : caption)),
       answers: this.answers,
       recent: this.recent(),
     };
@@ -307,6 +310,7 @@ class CueSession {
         if (segments.length) {
           for (const [index, segment] of segments.entries()) {
             const label = lines[index].speaker;
+            this.noticeStream(current.id, segment);
             cueLink.channel.line(current.id, label, segment.text, segment.startMs, segment.endMs);
             cueLink.recordings.line(current.id, { label, text: segment.text, startMs: segment.startMs, endMs: segment.endMs });
             cueLink.voices.heard(current.id, label, segment.startMs, segment.endMs);
@@ -320,8 +324,21 @@ class CueSession {
       this.partial = lines;
     }
     const last = lines[lines.length - 1];
-    if (last?.speaker) this.talking = last.speaker;
+    if (last?.speaker) {
+      this.talking = last.speaker;
+      this.talkingAtMs = last.atMs;
+    }
     this.notify();
+  }
+
+  /** A segment from a new transcription stream: its voice numbers started over, which the backend tells Claude. */
+  private noticeStream(contextId: string, segment: SpeakerSegment): void {
+    if (!segment.speaker) return;
+    const previous = this.streams.get(contextId);
+    this.streams.set(contextId, segment.stream);
+    if (previous === undefined || previous === segment.stream) return;
+    console.log(`[Cue] ${contextId}: transcription restarted (stream ${previous} → ${segment.stream})`);
+    cueLink.channel.voicesReset(contextId, segment.startMs);
   }
 
   /** The context's name for a Soniox label: "Voice N", numbered as first heard, stable across reconnects' new streams. */
@@ -345,8 +362,14 @@ class CueSession {
     return speaker ? { ...voice, name: speaker.name, personId: speaker.personId, confirmed: speaker.confirmed } : voice;
   }
 
-  /** "Priya" when confirmed, "Priya?" when not, else the label. */
-  private displayName(contextId: string, label: string): string {
+  /**
+   * Who said a line: the run's voice-print when it was sure (live voices get
+   * reused for other people), else the backend's name for the voice ("Priya",
+   * or "Priya?" unconfirmed), else the label.
+   */
+  private displayName(contextId: string, label: string, atMs: number): string {
+    const heard = cueLink.voices.identityAt(contextId, label, atMs);
+    if (heard) return heard.name;
     const speaker = cueLink.voices.speaker(contextId, label);
     if (!speaker?.name) return label;
     return speaker.confirmed ? speaker.name : `${speaker.name}?`;
@@ -398,12 +421,14 @@ class CueSession {
           break;
         case "pause":
           // The switch that follows tells the backend; a pause alone never happens.
+          cueLink.voices.closeRun(context.id);
           cueLink.recordings.pause();
           break;
         case "end":
           cueLink.channel.contextEnd(context.id, change.atMs, change.reason);
           cueLink.recordings.end(context.id, change.atMs, this.voiceNames(context.id), cueLink.voices.candidatesFor(context.id));
           cueLink.voices.endContext(context.id);
+          this.streams.delete(context.id);
           if (this.naming?.contextId === context.id) this.naming = null;
           this.voices.delete(context.id);
           this.items.delete(context.id);

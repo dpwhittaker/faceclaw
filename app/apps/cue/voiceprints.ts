@@ -1,9 +1,15 @@
 /**
  * Voice-prints: one person's voice as an L2-normalized speaker embedding
- * (WeSpeaker CAM++, the model Microphones uses). Each person keeps up to two,
+ * (3D-Speaker ERes2Net, 192 dimensions). Each person keeps up to two,
  * because someone heard through laptop speakers on a call sounds different
  * from the same person in the room; matching scores against both, and a
  * confirmed sample trains the closer one. Pure, so it runs under node tests.
+ *
+ * The thresholds come from 40 minutes of glasses audio (a house, a diesel
+ * truck, a festival) scored against the wearer's own labels: a run of one
+ * voice named at KNOWN with a KNOWN_MARGIN lead was always right, at LIKELY
+ * with a LIKELY_MARGIN lead right 96% of the time, and announcers never
+ * reached LIKELY against the family's prints.
  */
 
 export type Print = { embedding: number[]; count: number };
@@ -12,13 +18,16 @@ export type PersonPrints = { room?: Print; call?: Print };
 export type PrintStore = Record<string, PersonPrints>;
 export type PrintKind = "room" | "call";
 export type Score = { personId: string; similarity: number };
+export type Identity = { personId: string; similarity: number; margin: number; confidence: "high" | "medium" | "low" };
 
 /** Microphones' running-mean cap: later samples still count, at 1/25 weight. */
 export const PRINT_WEIGHT_CAP = 24;
-/** Below this a voice is no one Cue knows (Microphones' "new speaker" line). */
-export const PRINT_UNCERTAIN = 0.5;
-/** At or above this, the same voice (Microphones' "known"). */
-export const PRINT_KNOWN = 0.8;
+/** Two prints of one person in different places score at least about this. */
+export const PRINT_SAME = 0.6;
+export const KNOWN = 0.5;
+export const KNOWN_MARGIN = 0.1;
+export const LIKELY = 0.45;
+export const LIKELY_MARGIN = 0.05;
 
 export function similarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
   if (a.length !== b.length || !a.length) return 0;
@@ -46,6 +55,24 @@ export function scoreCandidates(embedding: ArrayLike<number>, store: PrintStore,
   return scores.sort((a, b) => b.similarity - a.similarity);
 }
 
+/** Who a voice is, from its scores (best first): high and medium name someone, low is a guess. */
+export function identify(scores: Score[]): Identity | null {
+  const [best, second] = scores;
+  if (!best) return null;
+  const margin = best.similarity - (second?.similarity ?? 0);
+  const confidence = best.similarity >= KNOWN && margin >= KNOWN_MARGIN ? "high" : best.similarity >= LIKELY && margin >= LIKELY_MARGIN ? "medium" : "low";
+  return { personId: best.personId, similarity: best.similarity, margin, confidence };
+}
+
+/** The mean of some embeddings, renormalized (a run of lines as one voice). */
+export function pool(embeddings: ArrayLike<number>[]): number[] | null {
+  const present = embeddings.filter((embedding) => embedding && embedding.length);
+  if (!present.length) return null;
+  const sum = new Array<number>(present[0].length).fill(0);
+  for (const embedding of present) for (let i = 0; i < sum.length; i++) sum[i] += embedding[i] ?? 0;
+  return normalize(sum);
+}
+
 /**
  * Folds a confirmed sample into a person's prints and returns the new
  * prints. The closer existing print learns from it; a person with no print
@@ -58,7 +85,7 @@ export function trainPrint(prints: PersonPrints | undefined, embedding: ArrayLik
   let target: PrintKind = kind;
   if (next[kind] && next[other]) {
     target = similarity(sample, next[other]!.embedding) > similarity(sample, next[kind]!.embedding) ? other : kind;
-  } else if (!next[kind] && next[other] && similarity(sample, next[other]!.embedding) >= PRINT_KNOWN) {
+  } else if (!next[kind] && next[other] && similarity(sample, next[other]!.embedding) >= PRINT_SAME) {
     target = other;
   }
   const current = next[target];

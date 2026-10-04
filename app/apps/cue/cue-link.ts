@@ -36,7 +36,7 @@ const MEMORY_CARD_SECONDS = 10;
 
 class CueLink {
   readonly channel = new CueChannel(androidCueTransport, this.events());
-  readonly voices = new CueVoices((contextId, speaker, seconds, scores) => this.channel.voiceprint(contextId, speaker, seconds, scores));
+  readonly voices = new CueVoices((contextId, speaker, seconds, scores, startMs, endMs) => this.channel.voiceprint(contextId, speaker, seconds, scores, startMs, endMs));
   readonly recordings = new CueRecordings(() => this.voices.store());
   private started = false;
   private config = "";

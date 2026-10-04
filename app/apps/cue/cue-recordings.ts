@@ -1,24 +1,11 @@
 import { toJavaBytes } from "../../native/cloud-stt";
 import { appFilesDirPath, deletePathRecursively, listDirectory, statPath, writeBinaryFile } from "../../native/file-access";
-import { sonioxCreate, sonioxDelete, sonioxStatus, sonioxTranscript, sonioxUpload, uploadFile } from "../../native/soniox-async";
-import { sonioxApiKeySetting } from "../../ui/dashboard-settings";
+import { uploadFile } from "../../native/file-upload";
 import { fetchWithUserAgent } from "../../util/http";
-import {
-  httpBase,
-  liveNames,
-  liveTranscript,
-  nameSpeaker,
-  sampleRanges,
-  tokensToSegments,
-  type LiveLine,
-  type RecordingPart,
-  type AsyncSegment,
-  type TranscriptSegment,
-  type VoiceName,
-} from "./after-conversation";
+import { httpBase, lineRanges, liveTranscript, nameLines, type LiveLine, type RecordingPart, type VoiceName } from "./after-conversation";
 import type { CueCandidate } from "./cue-channel";
 import { cueBackendTokenSetting, cueBackendUrlSetting } from "./cue-settings";
-import { YOU, embedRanges } from "./cue-voices";
+import { YOU, embedRanges, voiceModelPath } from "./cue-voices";
 import type { PrintStore } from "./voiceprints";
 
 declare const com: any;
@@ -27,10 +14,12 @@ declare const java: any;
 /**
  * Each context's recording, and what happens to it after the conversation.
  * One WAV per context, kept open while it's paused (a resume adds a part);
- * when it ends: AAC for keeping, Soniox's async re-transcription with
- * speaker labels, the speakers named from voice-print samples and the
- * names given live, then the hand-off to the backend (audio.m4a and
- * transcript.json, then POST done), which updates the notebooks. Each step
+ * when it ends: AAC for keeping, then every run of one live voice is
+ * voice-printed from the WAV and named (after-conversation.ts), then the
+ * hand-off to the backend (audio.m4a and transcript.json, then POST done),
+ * which updates the notebooks. Live transcription found the turns well;
+ * re-transcribing them (Soniox async, ElevenLabs) named people worse than
+ * the voice-prints do, so there's no second pass. Each step
  * is saved in the context's meta.json, so a failure or a restart picks up
  * where it stopped; the folder goes once the backend has it.
  */
@@ -42,15 +31,9 @@ const AAC_BITRATE = 32_000;
 export const BACKFILL_MS = 15_000;
 /** Shorter conversations aren't worth keeping. */
 const MIN_KEEP_MS = 5_000;
-const POLL_MS = 10_000;
-/** A transcription still running after this is checked again on the next try. */
-const POLL_LIMIT_MS = 30 * 60_000;
 const RETRY_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
-/** After this many failed tries at Soniox, the live transcript goes instead. */
-const ASYNC_TRIES = 4;
-const SAMPLES_PER_SPEAKER = 5;
 
-type Stage = "recording" | "ended" | "transcoded" | "transcribing" | "transcribed" | "named";
+type Stage = "recording" | "ended" | "transcoded" | "named";
 
 /** What the recorder knows about a context when it starts. */
 export type RecordingContext = { id: string; title: string; kind: string; org: string; location: string; startedMs: number };
@@ -63,11 +46,8 @@ type Meta = RecordingContext & {
   candidates: CueCandidate[];
   stage: Stage;
   tries: number;
-  asyncTries: number;
   nextTryMs: number;
   error: string;
-  sonioxFileId: string;
-  sonioxTranscriptionId: string;
 };
 
 type Open = { meta: Meta; recorder: any; bytes: number; part: RecordingPart | null };
@@ -101,7 +81,7 @@ export class CueRecordings {
     if (!open) {
       const meta: Meta = {
         ...context, endedMs: 0, parts: [], lines: [], voices: [], candidates: [], stage: "recording",
-        tries: 0, asyncTries: 0, nextTryMs: 0, error: "", sonioxFileId: "", sonioxTranscriptionId: "",
+        tries: 0, nextTryMs: 0, error: "",
       };
       try {
         open = { meta, recorder: new com.faceclaw.app.FaceclawWavRecorder(wavPath(context.id), SAMPLE_RATE, 1), bytes: 0, part: null };
@@ -231,7 +211,6 @@ export class CueRecordings {
           meta.tries += 1;
           meta.error = String((error as Error)?.message ?? error);
           meta.nextTryMs = Date.now() + RETRY_MS[Math.min(meta.tries - 1, RETRY_MS.length - 1)];
-          if (meta.stage === "transcribing" || meta.stage === "transcoded") meta.asyncTries += 1;
           save(meta);
           nextMs = Math.min(nextMs, meta.nextTryMs);
           this.setDetail(`Couldn't hand off "${meta.title}": ${meta.error}`);
@@ -264,21 +243,8 @@ export class CueRecordings {
       await transcode(wavPath(meta.id), m4aPath(meta.id));
       this.next(meta, "transcoded");
     }
-    if (meta.stage === "transcoded" || meta.stage === "transcribing") {
-      const apiKey = sonioxApiKeySetting.get().trim();
-      if (!apiKey || meta.asyncTries >= ASYNC_TRIES) {
-        // No async re-transcription: hand off what was heard live.
-        if (apiKey && (meta.sonioxFileId || meta.sonioxTranscriptionId)) {
-          await sonioxDelete(apiKey, meta.sonioxTranscriptionId, meta.sonioxFileId).catch(() => {});
-        }
-        writeJson(transcriptPath(meta.id), { source: "live", segments: liveTranscript(meta.lines, meta.voices) });
-        this.next(meta, "named");
-      } else {
-        this.setDetail(`Transcribing "${meta.title}"...`);
-        await this.transcribe(meta, apiKey);
-      }
-    }
-    if (meta.stage === "transcribed") {
+    // Builds before this one had a re-transcription step; their recordings pick up here.
+    if (meta.stage === "transcoded" || (meta.stage as string) === "transcribing" || (meta.stage as string) === "transcribed") {
       this.setDetail(`Naming the speakers in "${meta.title}"...`);
       await this.nameSpeakers(meta);
       this.next(meta, "named");
@@ -293,62 +259,27 @@ export class CueRecordings {
     }
   }
 
-  private async transcribe(meta: Meta, apiKey: string): Promise<void> {
-    if (!meta.sonioxFileId) {
-      meta.sonioxFileId = await sonioxUpload(apiKey, m4aPath(meta.id), "audio/mp4");
-      save(meta);
-    }
-    if (!meta.sonioxTranscriptionId) {
-      meta.sonioxTranscriptionId = await sonioxCreate(apiKey, meta.sonioxFileId);
-      this.next(meta, "transcribing");
-    }
-    const deadline = Date.now() + POLL_LIMIT_MS;
-    for (;;) {
-      const status = await sonioxStatus(apiKey, meta.sonioxTranscriptionId);
-      if (status.status === "completed") break;
-      if (status.status === "error") {
-        // Start over next time with a fresh transcription of the same file.
-        await sonioxDelete(apiKey, meta.sonioxTranscriptionId, "").catch(() => {});
-        meta.sonioxTranscriptionId = "";
-        throw new Error(`Soniox couldn't transcribe it: ${status.error}`);
-      }
-      if (Date.now() > deadline) throw new Error("Soniox is still transcribing; checking again later");
-      await sleep(POLL_MS);
-    }
-    // Kept as speaker turns: a long meeting's tokens run to megabytes.
-    const tokens = await sonioxTranscript(apiKey, meta.sonioxTranscriptionId);
-    writeJson(asyncPath(meta.id), tokensToSegments(tokens, meta.parts));
-    try {
-      await sonioxDelete(apiKey, meta.sonioxTranscriptionId, meta.sonioxFileId);
-    } catch (error) {
-      console.warn(`[Cue] Soniox cleanup for ${meta.id}: ${String(error)}`);
-    }
-    meta.sonioxFileId = meta.sonioxTranscriptionId = "";
-    this.next(meta, "transcribed");
-  }
-
-  /** Names each async speaker from voice-print samples of the WAV and the names given live. */
+  /** Names every live line: each run of one voice voice-printed from the WAV, or the live names when that can't run. */
   private async nameSpeakers(meta: Meta): Promise<void> {
-    const segments = (readJson(asyncPath(meta.id)) ?? []) as AsyncSegment[];
-    const store = this.prints();
-    const names = new Map<string, string>([[YOU, "You"]]);
-    for (const candidate of meta.candidates) names.set(candidate.personId, candidate.name);
-    for (const voice of meta.voices) if (voice.personId) names.set(voice.personId, voice.name);
-    const candidates = [...names.keys()];
-    const live = liveNames(meta.lines, meta.voices);
-    const named = new Map<string, ReturnType<typeof nameSpeaker>>();
-    for (const speaker of new Set(segments.map((segment) => segment.speaker))) {
-      const ranges = sampleRanges(segments, speaker, SAMPLES_PER_SPEAKER);
-      const samples = await new Promise<(number[] | null)[]>((resolve) => embedRanges(wavPath(meta.id), ranges, resolve));
-      named.set(speaker, nameSpeaker(segments, speaker, samples, store, candidates, live, names));
-      console.log(`[Cue] ${meta.id}: speaker ${speaker} → ${named.get(speaker)?.name ?? "?"} (${named.get(speaker)?.confidence})`);
+    const wav = wavPath(meta.id);
+    const ranges = lineRanges(meta.lines, meta.parts);
+    const wanted = ranges.map((range, index) => ({ range, index })).filter((item): item is { range: { startMs: number; endMs: number }; index: number } => item.range !== null);
+    let segments;
+    if (!statPath(wav) || !wanted.length || !voiceModelPath()) {
+      segments = liveTranscript(meta.lines, meta.voices);
+    } else {
+      const found = await new Promise<(number[] | null)[]>((resolve) => embedRanges(wav, wanted.map((item) => item.range), resolve));
+      const embeddings: (number[] | null)[] = meta.lines.map(() => null);
+      wanted.forEach((item, i) => (embeddings[item.index] = found[i]));
+      const names = new Map<string, string>([[YOU, "You"]]);
+      for (const candidate of meta.candidates) names.set(candidate.personId, candidate.name);
+      for (const voice of meta.voices) if (voice.personId) names.set(voice.personId, voice.name);
+      segments = nameLines(meta.lines, embeddings, this.prints(), [...names.keys()], names, meta.voices);
+      const named = segments.filter((segment) => segment.confidence !== "low").length;
+      console.log(`[Cue] ${meta.id}: ${named}/${segments.length} lines named by voice-print or the wearer`);
     }
-    const transcript: TranscriptSegment[] = segments.map((segment) => {
-      const name = named.get(segment.speaker);
-      return { speaker: segment.speaker, personId: name?.personId ?? null, name: name?.name ?? null, confidence: name?.confidence ?? "low", text: segment.text, startMs: segment.startMs, endMs: segment.endMs };
-    });
-    writeJson(transcriptPath(meta.id), { source: "soniox-async", segments: transcript });
-    deletePathRecursively(wavPath(meta.id));
+    writeJson(transcriptPath(meta.id), { source: "live, named by voice-prints", segments });
+    deletePathRecursively(wav);
   }
 
   private next(meta: Meta, stage: Stage): void {
@@ -423,7 +354,6 @@ function dirPath(contextId: string): string {
 }
 const wavPath = (id: string) => `${dirPath(id)}/audio.wav`;
 const m4aPath = (id: string) => `${dirPath(id)}/audio.m4a`;
-const asyncPath = (id: string) => `${dirPath(id)}/soniox.json`;
 const transcriptPath = (id: string) => `${dirPath(id)}/transcript.json`;
 const contextPath = (id: string) => `${dirPath(id)}/context.json`;
 const metaPath = (id: string) => `${dirPath(id)}/meta.json`;
@@ -472,6 +402,3 @@ function utf8(text: string): Uint8Array {
   return Uint8Array.from(out);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}

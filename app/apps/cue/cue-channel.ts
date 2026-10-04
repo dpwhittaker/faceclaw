@@ -172,9 +172,14 @@ export class CueChannel {
     this.enqueue({ type: "status-clear", notebook });
   }
 
-  /** A voice's pooled speech, scored against the context's candidates. */
-  voiceprint(contextId: string, speaker: string, seconds: number, scores: CueVoiceScore[]): void {
-    this.enqueue({ type: "voiceprint", contextId, speaker, seconds: Math.round(seconds * 10) / 10, scores });
+  /** One run of a voice (startMs to endMs), scored against the context's candidates. */
+  voiceprint(contextId: string, speaker: string, seconds: number, scores: CueVoiceScore[], startMs?: number, endMs?: number): void {
+    this.enqueue({ type: "voiceprint", contextId, speaker, seconds: Math.round(seconds * 10) / 10, scores, startMs, endMs });
+  }
+
+  /** The live transcription restarted: its voice numbers started over. */
+  voicesReset(contextId: string, atMs: number): void {
+    this.enqueue({ type: "voices-reset", contextId, atMs });
   }
 
   /** The wearer says who a voice is: a known person, or a new name. */

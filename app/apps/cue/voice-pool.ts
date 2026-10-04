@@ -1,9 +1,11 @@
 /**
- * The audio behind each live voice: a ring of recent microphone audio on
- * the transcription's own clock, and per-voice pools of that audio cut to
- * each voice's words. A pool asks to be embedded once it holds
- * POOL_FIRST_MS, then every POOL_STEP_MS more, up to POOL_MAX_MS. Pure, so
- * it runs under node tests.
+ * The audio behind each run of one voice: a ring of recent microphone
+ * audio on the transcription's clock, and the run being spoken now, cut to
+ * its words. Live transcription is good at noticing that the speaker
+ * changed and poor at knowing who it changed to (it reuses its numbers,
+ * and starts over when its stream restarts), so each run is voice-printed
+ * on its own: when it ends, and at RUN_FIRST_MS, then every RUN_STEP_MS
+ * more, up to RUN_MAX_MS, while it goes on. Pure, so it runs under node tests.
  */
 
 const BYTES_PER_MS = 32; // 16 kHz, 16-bit mono
@@ -11,9 +13,13 @@ export const RING_KEEP_MS = 180_000;
 /** Words' edges are fuzzy; keep only a segment's middle. */
 export const TRIM_MS = 150;
 export const MIN_SEGMENT_MS = 600;
-export const POOL_FIRST_MS = 8_000;
-export const POOL_STEP_MS = 8_000;
-export const POOL_MAX_MS = 30_000;
+/** A run shorter than this when it ends isn't worth a voice-print. */
+export const RUN_MIN_MS = 1_500;
+export const RUN_FIRST_MS = 8_000;
+export const RUN_STEP_MS = 8_000;
+export const RUN_MAX_MS = 30_000;
+/** A pause this long ends a run even when the same voice goes on. */
+export const RUN_GAP_MS = 20_000;
 /** How close a chunk's arrival must be to a stream's origin to be its first chunk. */
 const ORIGIN_MATCH_MS = 3;
 
@@ -91,39 +97,59 @@ export class PcmRing {
   }
 }
 
-type Pool = { parts: Uint8Array[]; bytes: number; nextBytes: number };
+/** A run: one live voice label's consecutive words. */
+export type Run = { label: string; startMs: number; endMs: number };
+/** A run's pooled audio, due for a voice-print. */
+export type RunAudio = { run: Run; pcm: Uint8Array; seconds: number };
 
-export class VoicePools {
-  private readonly pools = new Map<string, Pool>();
+type OpenRun = Run & { parts: Uint8Array[]; bytes: number; nextBytes: number; embeddedBytes: number };
+
+export class RunPools {
+  private open: OpenRun | null = null;
 
   /**
-   * Adds one segment of a voice's speech (its start and end, as the
-   * transcript times it); returns the pooled audio when it's time to embed.
+   * Adds one final segment (its label and times, as the transcript has
+   * them); returns what's due for a voice-print: the run this segment ended,
+   * and this run when it has reached its next step.
    */
-  add(voice: string, ring: PcmRing, startMs: number, endMs: number): { pcm: Uint8Array; seconds: number } | null {
-    if (endMs - startMs < MIN_SEGMENT_MS) return null;
-    const audio = ring.slice(startMs + TRIM_MS, endMs - TRIM_MS);
-    if (!audio.length) return null;
-    let pool = this.pools.get(voice);
-    if (!pool) this.pools.set(voice, (pool = { parts: [], bytes: 0, nextBytes: POOL_FIRST_MS * BYTES_PER_MS }));
-    pool.parts.push(audio);
-    pool.bytes += audio.length;
-    // Keep the latest POOL_MAX_MS: the voice as it sounds now.
-    while (pool.parts.length > 1 && pool.bytes > POOL_MAX_MS * BYTES_PER_MS) pool.bytes -= pool.parts.shift()!.length;
-    if (pool.bytes < pool.nextBytes || pool.nextBytes > POOL_MAX_MS * BYTES_PER_MS) return null;
-    pool.nextBytes += POOL_STEP_MS * BYTES_PER_MS;
-    return this.pooled(voice);
+  add(label: string, ring: PcmRing, startMs: number, endMs: number): RunAudio[] {
+    const due: RunAudio[] = [];
+    if (this.open && (this.open.label !== label || startMs - this.open.endMs > RUN_GAP_MS)) {
+      const closed = this.close();
+      if (closed) due.push(closed);
+    }
+    if (!this.open) this.open = { label, startMs, endMs, parts: [], bytes: 0, nextBytes: RUN_FIRST_MS * BYTES_PER_MS, embeddedBytes: 0 };
+    const run = this.open;
+    run.endMs = Math.max(run.endMs, endMs);
+    if (endMs - startMs >= MIN_SEGMENT_MS) {
+      const audio = ring.slice(startMs + TRIM_MS, endMs - TRIM_MS);
+      if (audio.length) {
+        run.parts.push(audio);
+        run.bytes += audio.length;
+        // Keep the latest RUN_MAX_MS: the voice as it sounds now.
+        while (run.parts.length > 1 && run.bytes > RUN_MAX_MS * BYTES_PER_MS) run.bytes -= run.parts.shift()!.length;
+      }
+    }
+    if (run.bytes >= run.nextBytes && run.nextBytes <= RUN_MAX_MS * BYTES_PER_MS) {
+      run.nextBytes += RUN_STEP_MS * BYTES_PER_MS;
+      due.push(this.audio(run));
+    }
+    return due;
   }
 
-  /** A voice's pooled audio now (for training a print once it's named). */
-  pooled(voice: string): { pcm: Uint8Array; seconds: number } | null {
-    const pool = this.pools.get(voice);
-    if (!pool || !pool.bytes) return null;
-    return { pcm: concat(pool.parts, pool.bytes), seconds: pool.bytes / BYTES_PER_MS / 1000 };
+  /** Ends the open run (a pause, a switch); returns it if it has new audio worth a voice-print. */
+  close(): RunAudio | null {
+    const run = this.open;
+    this.open = null;
+    if (!run || run.bytes < RUN_MIN_MS * BYTES_PER_MS) return null;
+    // Already printed at its last step and barely longer since: nothing new.
+    if (run.embeddedBytes && run.bytes - run.embeddedBytes < 2_000 * BYTES_PER_MS) return null;
+    return this.audio(run);
   }
 
-  clear(): void {
-    this.pools.clear();
+  private audio(run: OpenRun): RunAudio {
+    run.embeddedBytes = run.bytes;
+    return { run: { label: run.label, startMs: run.startMs, endMs: run.endMs }, pcm: concat(run.parts, run.bytes), seconds: run.bytes / BYTES_PER_MS / 1000 };
   }
 }
 

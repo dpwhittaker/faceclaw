@@ -16,7 +16,7 @@ declare const java: any;
  * asr-model.ts; this module only adds the speaker models.
  */
 
-export type MicModelId = "speaker-embedding" | "diarization-segmentation";
+export type MicModelId = "speaker-embedding" | "speaker-embedding-eres2net" | "diarization-segmentation";
 
 type MicModelFile = {
   /** Local file name under the model directory. */
@@ -51,6 +51,22 @@ export const MIC_MODELS: MicModel[] = [
       },
     ],
     totalBytes: 29292684,
+  },
+  {
+    // Cue's voice-prints: on glasses audio CAM++ above did no better than
+    // chance at telling family members apart; ERes2Net got 92-94% right.
+    id: "speaker-embedding-eres2net",
+    label: "Speaker voices (3D-Speaker ERes2Net English)",
+    baseUrl: "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/",
+    files: [
+      {
+        name: "speaker-embedding-eres2net.onnx",
+        remoteName: "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+        sha256: "c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5",
+        sizeBytes: 26485263,
+      },
+    ],
+    totalBytes: 26485263,
   },
   {
     id: "diarization-segmentation",

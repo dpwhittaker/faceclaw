@@ -1,32 +1,38 @@
 import { appFilesDirPath, readTextFile, writeBinaryFile } from "../../native/file-access";
 import { micModelPath, startMicModelDownload } from "../microphones/mic-models";
-import { speakerRegistry } from "../microphones/speakers";
 import type { CueCandidate, CueSpeaker, CueVoiceScore } from "./cue-channel";
-import { PcmRing, VoicePools } from "./voice-pool";
-import { normalize, printKindFor, scoreCandidates, trainPrint, type PrintKind, type PrintStore } from "./voiceprints";
+import { PcmRing, RunPools, type RunAudio } from "./voice-pool";
+import { identify, printKindFor, scoreCandidates, trainPrint, type Identity, type PrintKind, type PrintStore } from "./voiceprints";
 
 declare const com: any;
 
 /** The wearer's personId, as the backend names them. */
 export const YOU = "you";
-const MODEL = "speaker-embedding";
+const MODEL = "speaker-embedding-eres2net";
 const SCORES_SENT = 5;
 
-export type VoiceprintSink = (contextId: string, label: string, seconds: number, scores: CueVoiceScore[]) => void;
+export type VoiceprintSink = (contextId: string, label: string, seconds: number, scores: CueVoiceScore[], startMs: number, endMs: number) => void;
+
+/** Who one run of a live voice sounded like. */
+export type RunIdentity = { label: string; startMs: number; endMs: number; identity: Identity | null };
 
 /**
  * Cue's live voice-prints. Microphone audio goes into a ring on the
- * transcription's clock; each final segment adds its voice's words to that
- * voice's pool; a pool that's due is embedded on FaceclawCueAudio's worker
- * and scored against the context's candidates and the wearer, and the
- * scores go to the backend, which names the voice. A confirmed name trains
- * that person's print with the voice's latest embedding. Prints never leave
- * the phone.
+ * transcription's clock; final segments are grouped into runs of one live
+ * voice (live transcription finds speaker changes well but reuses its voice
+ * numbers for other people); each run is embedded on FaceclawCueAudio's
+ * worker and scored against the context's candidates and the wearer. The
+ * scores go to the backend with the run's times, and a confident match
+ * names that run's lines on the glasses whatever the live voice was called.
+ * A confirmed name trains that person's print with the voice's latest run,
+ * unless that run sounded like someone else. Prints never leave the phone.
  */
 export class CueVoices {
   private readonly ring = new PcmRing();
-  private readonly pools = new Map<string, VoicePools>();
-  private readonly latest = new Map<string, number[]>();
+  private readonly pools = new Map<string, RunPools>();
+  // contextId\nlabel → the voice's latest run: its embedding and who it sounded like.
+  private readonly latest = new Map<string, { embedding: number[]; identity: Identity | null }>();
+  private readonly runs = new Map<string, RunIdentity[]>();
   private readonly candidates = new Map<string, CueCandidate[]>();
   private readonly kinds = new Map<string, PrintKind>();
   private readonly speakers = new Map<string, CueSpeaker>();
@@ -82,19 +88,51 @@ export class CueVoices {
   heard(contextId: string, label: string, startMs: number, endMs: number): void {
     if (!label) return;
     let pools = this.pools.get(contextId);
-    if (!pools) this.pools.set(contextId, (pools = new VoicePools()));
-    const due = pools.add(label, this.ring, startMs, endMs);
-    if (!due) return;
+    if (!pools) this.pools.set(contextId, (pools = new RunPools()));
+    for (const due of pools.add(label, this.ring, startMs, endMs)) this.embedRun(contextId, due);
+  }
+
+  /** The context paused or ended: the run being spoken is over. */
+  closeRun(contextId: string): void {
+    const due = this.pools.get(contextId)?.close();
+    if (due) this.embedRun(contextId, due);
+  }
+
+  /** Who the run of this voice around atMs sounded like, when the voice-print was sure enough to say. */
+  identityAt(contextId: string, label: string, atMs: number): { personId: string; name: string } | null {
+    const run = (this.runs.get(contextId) ?? []).find((candidate) => candidate.label === label && atMs >= candidate.startMs - 500 && atMs <= candidate.endMs + 500);
+    const identity = run?.identity;
+    if (!identity || identity.confidence === "low") return null;
+    return { personId: identity.personId, name: this.nameOf(contextId, identity.personId) };
+  }
+
+  private embedRun(contextId: string, due: RunAudio): void {
     embedPcm(due.pcm, (embedding) => {
       if (!embedding || !this.kinds.has(contextId)) return;
+      const scores = this.score(contextId, embedding);
+      const identity = identify(scores);
+      const { label, startMs, endMs } = due.run;
+      const runs = this.runs.get(contextId) ?? [];
+      const existing = runs.find((run) => run.label === label && run.startMs === startMs);
+      if (existing) Object.assign(existing, { endMs, identity });
+      else runs.push({ label, startMs, endMs, identity });
+      if (runs.length > 500) runs.splice(0, runs.length - 500);
+      this.runs.set(contextId, runs);
       const voice = key(contextId, label);
-      this.latest.set(voice, embedding);
+      this.latest.set(voice, { embedding, identity });
       this.trained.delete(voice);
-      this.send(contextId, label, due.seconds, this.score(contextId, embedding));
+      this.send(contextId, label, due.seconds, scores, startMs, endMs);
       // A voice already named learns from its new audio too.
       const speaker = this.speakers.get(voice);
       if (speaker?.confirmed && speaker.personId) this.train(contextId, label, speaker.personId);
     });
+  }
+
+  private nameOf(contextId: string, personId: string): string {
+    if (personId === YOU) return "You";
+    return this.candidatesFor(contextId).find((candidate) => candidate.personId === personId)?.name
+      ?? [...this.speakers.values()].find((speaker) => speaker.personId === personId)?.name
+      ?? personId;
   }
 
   /** The backend named a voice; a confirmed name trains that person's print. */
@@ -106,6 +144,7 @@ export class CueVoices {
   /** A context ended: its pools and names go (the recording keeps the names it needs). */
   endContext(contextId: string): void {
     this.pools.delete(contextId);
+    this.runs.delete(contextId);
     this.candidates.delete(contextId);
     this.kinds.delete(contextId);
     for (const map of [this.latest, this.speakers, this.trained] as Map<string, unknown>[]) {
@@ -113,7 +152,7 @@ export class CueVoices {
     }
   }
 
-  /** The prints, loaded on first use; the wearer's starts from Microphones' enrolled voice. */
+  /** The prints, loaded on first use. (Microphones' voices use another model, so they can't seed these.) */
   store(): PrintStore {
     if (this.prints) return this.prints;
     let prints: PrintStore = {};
@@ -121,10 +160,6 @@ export class CueVoices {
       prints = JSON.parse(readTextFile(printsPath()) ?? "{}") as PrintStore;
     } catch (error) {
       console.warn(`[Cue] voice-prints unreadable, starting over: ${String(error)}`);
-    }
-    if (!prints[YOU]) {
-      const wearer = speakerRegistry.wearer()?.embedding;
-      if (wearer) prints[YOU] = { room: { embedding: normalize(wearer), count: 1 } };
     }
     this.prints = prints;
     return prints;
@@ -139,8 +174,11 @@ export class CueVoices {
 
   private train(contextId: string, label: string, personId: string): void {
     const voice = key(contextId, label);
-    const embedding = this.latest.get(voice);
-    if (!embedding || this.trained.get(voice) === personId) return;
+    const latest = this.latest.get(voice);
+    if (!latest || this.trained.get(voice) === personId) return;
+    // Live voices get reused for other people: never train on a run that sounded like someone else.
+    if (latest.identity && latest.identity.confidence !== "low" && latest.identity.personId !== personId) return;
+    const embedding = latest.embedding;
     const prints = this.store();
     prints[personId] = trainPrint(prints[personId], embedding, this.kindFor(contextId));
     this.trained.set(voice, personId);
