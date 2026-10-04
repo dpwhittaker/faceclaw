@@ -87,7 +87,7 @@ test('every group offers at least two boxes and every key is a single character'
   for (const { text } of keyCosts(kb.KEYBOARD_ROOT)) assert.equal(Array.from(text).length, 1, text);
 });
 
-test('the cursor opens at the letters, types with swipes and taps, and returns there after each key', () => {
+test('the cursor opens at the letters, types with swipes and taps, and returns there after each key (digits to the numbers)', () => {
   const k = new kb.TrinaryKeyboard();
   assert.ok(k.isAtHome()); assert.deepEqual(plain(k.trail()), ['Letters']);
   const type = (...moves) => {
@@ -116,10 +116,13 @@ test('the cursor opens at the letters, types with swipes and taps, and returns t
   assert.equal(k.back(), true); assert.ok(k.isAtHome());
   assert.equal(k.back(), true); assert.ok(k.isAtRoot());
   assert.equal(k.back(), false);
+  // A digit returns to numbers and punctuation, ready for the next digit or a decimal point.
   assert.deepEqual(plain(type('up', 'up', 'tap', 'tap')), { kind: 'typed', text: '5' });
+  assert.deepEqual(plain(k.trail()), ['Numbers & punctuation']);
+  assert.deepEqual(plain(type('down', 'tap', 'tap', 'tap')), { kind: 'typed', text: '0' });
+  assert.deepEqual(plain(k.trail()), ['Numbers & punctuation']);
+  assert.deepEqual(plain(type('tap', 'tap', 'tap')), { kind: 'typed', text: '.' });
   assert.ok(k.isAtHome());
-  k.back();
-  assert.deepEqual(plain(type('up', 'down', 'tap', 'tap', 'tap')), { kind: 'typed', text: '0' });
   k.back();
   assert.deepEqual(plain(type('up', 'down', 'down', 'down', 'tap')), { kind: 'typed', text: '\n' });
   k.back(); k.tap();

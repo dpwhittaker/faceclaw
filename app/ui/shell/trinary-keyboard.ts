@@ -5,14 +5,15 @@
  * the top box, swipe down into the bottom one, tap into the middle one (or
  * types it when it is a single character), double-tap zooms back out.
  *
- * The keyboard opens, and returns after every character, at the letters
- * group: 26 letters and space in nine rows of three. The middle of each row
+ * The keyboard opens, and returns after every character but a digit, at
+ * the letters group: 26 letters and space in nine rows of three. The middle of each row
  * is one of the nine most common characters (space and the eight most
  * common English letters), so those take two moves and a tap while the rest
  * take three moves and a tap. One zoom out from the letters is the root,
  * with numbers and punctuation above the letters and everything else (a
  * deeper tree: accents, symbols, arrows, box drawing, Greek, Cyrillic, kana)
- * below.
+ * below. A digit returns to numbers and punctuation instead, since most
+ * numbers run to more than one digit.
  *
  * Kept free of NativeScript imports so tests can load it under plain node.
  */
@@ -205,6 +206,15 @@ export function capitalOf(leaf: KeyLeaf): string {
   return leaf.text.toUpperCase();
 }
 
+/**
+ * Where the cursor goes after typing `text`: the numbers and punctuation
+ * for a digit (the next key is likely another digit, or a decimal point),
+ * the letters for anything else.
+ */
+export function groupAfter(text: string): KeyGroup {
+  return /^[0-9]$/.test(text) ? NUMBERS_AND_PUNCTUATION : LETTERS;
+}
+
 /** What a gesture did: zoomed, typed `text`, or nothing (an empty box). */
 export type KeyboardOutcome =
   | { kind: "moved" }
@@ -218,14 +228,13 @@ export type KeyboardOutcome =
 export class TrinaryKeyboard {
   private path: KeyNode[] = [];
 
-  constructor(private readonly root: KeyGroup = KEYBOARD_ROOT, private readonly home: KeyGroup = LETTERS) {
+  constructor() {
     this.reset();
   }
 
-  /** Back to the letters: the opening level, and where every typed character returns to. */
-  reset(): void {
-    const homeSlot = this.root.children.indexOf(this.home);
-    this.path = homeSlot >= 0 ? [this.root, this.home] : [this.root];
+  /** Back to one of the root's groups: by default the letters, where the keyboard opens. */
+  reset(group: KeyGroup = LETTERS): void {
+    this.path = [KEYBOARD_ROOT, group];
   }
 
   current(): KeyNode {
@@ -237,7 +246,7 @@ export class TrinaryKeyboard {
   }
 
   isAtHome(): boolean {
-    return this.current() === this.home;
+    return this.current() === LETTERS;
   }
 
   /** The labelled groups from the root down to here (the breadcrumb). */
@@ -275,8 +284,9 @@ export class TrinaryKeyboard {
   tap(capital = false): KeyboardOutcome {
     const leaf = this.tapKey();
     if (leaf) {
-      this.reset();
-      return { kind: "typed", text: capital ? capitalOf(leaf) : leaf.text };
+      const text = capital ? capitalOf(leaf) : leaf.text;
+      this.reset(groupAfter(text));
+      return { kind: "typed", text };
     }
     if (capital) return { kind: "none" };
     const current = this.current();
