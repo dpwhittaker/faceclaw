@@ -125,6 +125,9 @@ test("naming: a confident voice-print beats the live name; an unsure one leaves 
   // Too close to call: the live name stands, as a guess when nobody confirmed it.
   const unsure = nameLines([line("Voice 9", "Hello.", 0, 3_000)], [normalize([1, 0, 0, 0.98, 0, 0, 0, 0])], store, ["delisa", "makayla"], names, [{ label: "Voice 9", personId: "makayla", name: "Makayla", confidence: "medium", confirmed: false }]);
   assert.deepEqual([unsure[0].name, unsure[0].confidence], ["Makayla", "low"]);
+  // A word or two isn't enough print to overrule the wearer's name for the voice.
+  const short = nameLines([line("Voice 5", "Yeah.", 0, 600), line("Voice 5", "Okay.", 700, 1_400)], [voice(0), voice(0)], store, ["delisa", "makayla"], names, voices);
+  assert.deepEqual(short.map((s) => [s.name, s.confidence]), [["Makayla", "medium"], ["Makayla", "medium"]]);
 });
 
 test("hand-off helpers: the live transcript as a fallback, the backend's HTTP address", () => {

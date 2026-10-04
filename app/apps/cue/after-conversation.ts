@@ -27,6 +27,10 @@ export type LineRun = { label: string; lines: number[] };
 export const LINE_RUN_GAP_MS = 20_000;
 /** Longer lines are sampled from their start: plenty for a voice-print. */
 export const MAX_LINE_SAMPLE_MS = 20_000;
+/** Shorter lines ("Yeah.", "What?") print too noisily to count. */
+export const MIN_LINE_PRINT_MS = 1_000;
+/** A run needs this much printed speech before its print can overrule the live name. */
+export const MIN_RUN_PRINT_MS = 1_500;
 
 /** Where a moment of the conversation sits in the recording, or null if it wasn't recorded. */
 export function offsetOf(parts: RecordingPart[], wallMs: number): number | null {
@@ -74,7 +78,9 @@ export function nameLines(
   const byLabel = new Map(voices.map((voice) => [voice.label, voice]));
   const out: TranscriptSegment[] = new Array(lines.length);
   for (const run of lineRuns(lines)) {
-    const pooled = pool(run.lines.map((index) => embeddings[index]).filter((embedding): embedding is ArrayLike<number> => Boolean(embedding)));
+    const printed = run.lines.filter((index) => embeddings[index] && lines[index].endMs - lines[index].startMs >= MIN_LINE_PRINT_MS);
+    const printedMs = printed.reduce((sum, index) => sum + Math.min(lines[index].endMs - lines[index].startMs, MAX_LINE_SAMPLE_MS), 0);
+    const pooled = printedMs >= MIN_RUN_PRINT_MS ? pool(printed.map((index) => embeddings[index]!)) : null;
     const identity = pooled ? identify(scoreCandidates(pooled, store, candidates)) : null;
     const voice = byLabel.get(run.label);
     let who: { personId: string | null; name: string | null; confidence: string };
