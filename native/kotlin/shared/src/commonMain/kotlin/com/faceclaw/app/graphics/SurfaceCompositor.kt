@@ -704,6 +704,80 @@ class SurfaceCompositor {
                 row++
             }
         }
+        if ((dim < 256)) {
+            reshadeDimmedTextLocked(gray, surface, dim)
+        }
+    }
+
+    /**
+     * Re-shade a dimmed surface's text the way the glasses draw it. Glyph and firmware-text draws
+     * keep their cached-draw form with a dimmed value, and the firmware shades a cached glyph
+     * through a LUT (source nibble n -> n * top / 15). Dimming the baked pixels instead rounds
+     * anti-aliased edges differently (a coverage-2 pixel under a quarter dim comes out level 1
+     * where the LUT gives 0), so the texture planner found no glyph matching and shipped all the
+     * text as pixels: a dimmed full-height terminal under the system menu came to a ~35 KB record
+     * that the glasses never acknowledged. Only ink the surface still shows as that draw produced
+     * it is rewritten, so whatever the surface painted over a glyph stays; surfaces above blend
+     * afterwards and occlude as usual.
+     */
+    private fun reshadeDimmedTextLocked(gray: ByteArray, surface: Surface, dim: Int): Unit {
+        for (draw in surface.draws) {
+            var top: Int = BmpUtil.nibbleForGray(draw.value)
+            var dimmedTop: Int = BmpUtil.nibbleForGray(dimValue(draw.value, dim))
+            if ((draw.kind == ScreenDraw.KIND_GLYPH)) {
+                var atlas: GlyphAtlas.Glyph = GlyphAtlas.get(draw.fontId, draw.encoding) ?: continue
+                for (row in atlas.inkTop until (atlas.inkTop + atlas.inkHeight)) {
+                    for (col in 0 until atlas.width) {
+                        reshadePixelLocked(gray, surface, (draw.x + atlas.bbxX + col), (draw.y + row),
+                            atlas.nibbleAt(col, row), top, dimmedTop)
+                    }
+                }
+            } else if ((draw.kind == ScreenDraw.KIND_FWTEXT)) {
+                var cps: IntArray = draw.fwCps ?: continue
+                for (i in cps.indices) {
+                    if (!draw.fwInk!![i]) {
+                        continue
+                    }
+                    var entry: FwGlyphAtlas.Entry = FwGlyphAtlas.get(cps[i]) ?: continue
+                    var left: Int = (draw.x + draw.fwDx!![i] + entry.ofsX)
+                    for (row in 0 until entry.boxH) {
+                        for (col in 0 until entry.boxW) {
+                            reshadePixelLocked(gray, surface, (left + col), (draw.y + entry.inkTop + row),
+                                entry.nibbleAt(col, row), top, dimmedTop)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** One ink pixel of [reshadeDimmedTextLocked], in surface-local coordinates. */
+    private fun reshadePixelLocked(
+        gray: ByteArray,
+        surface: Surface,
+        localX: Int,
+        localY: Int,
+        source: Int,
+        top: Int,
+        dimmedTop: Int,
+    ): Unit {
+        var expected: Int = ((source * top) / 15)
+        // Zero-level ink leaves no trace in the surface to recognize, and dims to zero anyway.
+        if (((expected == 0) || (localX < 0) || (localY < 0) || (localX >= surface.width) ||
+                (localY >= surface.height))) {
+            return
+        }
+        var x: Int = (surface.x + localX)
+        var y: Int = (surface.y + localY)
+        if (((x < 0) || (y < 0) || (x >= screenWidth) || (y >= screenHeight))) {
+            return
+        }
+        var pixel: Int = (surface.pixels[((localY * surface.width) + localX)].toInt() and 0xff)
+        if ((BmpUtil.nibbleForGray(pixel) != expected)) {
+            return
+        }
+        // At least 1: still the surface's own (black) pixel on the color-key composite.
+        gray[((y * screenWidth) + x)] = (maxOf(1, (((source * dimmedTop) / 15) * 16))).toByte()
     }
 
     private fun requireScreenConfiguredLocked(): Unit {

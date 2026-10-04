@@ -60,6 +60,49 @@ class TextureCacheTest {
     }
 
     @Test
+    fun dimmedAntiAliasedTextStaysCachedGlyphs() {
+        // A 4x2 AA glyph whose edges carry the coverage levels (2, 3) that a quarter dim used to
+        // round up to level 1 where the firmware LUT draws 0.
+        val coverage = arrayOf(intArrayOf(15, 8, 3, 2), intArrayOf(2, 3, 8, 15))
+        val key = "dim-reshade-test".encodeToByteArray()
+        GlyphAtlas.registerAa(ArrayByteReader(byteArrayOf(key.size.toByte()) + key + byteArrayOf(
+            4, 1, 0, 65, 0, 0, 0, 0, 1, 4, 2, 0xf8.toByte(), 0x32, 0x23, 0x8f.toByte())))
+        val fontId = GlyphAtlas.fontId("dim-reshade-test")
+        val value = 235
+        fun composite(paintOver: Boolean): SurfaceCompositor.Composite {
+            val c = SurfaceCompositor()
+            c.configureScreen(8, 4)
+            c.configureSurface("term", 0, 0, 8, 4, 0, 0)
+            // Baked as the TS side does: level n * top / 15, written as 16 * level.
+            val pixels = ByteArray(32)
+            for (row in 0..1) for (col in 0..3) pixels[(1 + row) * 8 + 1 + col] = (coverage[row][col] * 16).toByte()
+            if (paintOver) pixels[1 * 8 + 1] = 100
+            val draw = byteArrayOf(0, fontId.toByte(), (fontId shr 8).toByte(), 65, 0, 0, 0, 1, 0, 0, 0, value.toByte())
+            c.submitSurface("term", ArrayByteReader(pixels), 0, 0, 8, 4, "1", ArrayByteReader(draw))
+            c.setUnderlayDim(1, 64)
+            return c.composite()
+        }
+        fun plan(composite: SurfaceCompositor.Composite) = TexturePlanner.plan(null,
+            BmpUtil.pack4bppFromGray8(composite.gray, 8, 4), 8, 4, composite.draws, TextureCacheState(), 1, true, 8,
+            testPlatform())
+
+        val dimmed = composite(paintOver = false)
+        // dimValue(235, 64) = 59 is level 4: the LUT gives n * 4 / 15, and 1 (black) for level 0.
+        assertEquals(64, dimmed.gray[1 * 8 + 1].toInt() and 255)
+        assertEquals(32, dimmed.gray[1 * 8 + 2].toInt() and 255)
+        assertEquals(1, dimmed.gray[1 * 8 + 3].toInt() and 255)
+        assertEquals(1, dimmed.gray[1 * 8 + 4].toInt() and 255)
+        val result = assertNotNull(plan(dimmed))
+        assertEquals(1, result.drawnGlyphs)
+        assertEquals(0, result.bakedCandidates)
+
+        // Ink the surface painted over is not the glyph's: it dims as raster and stays baked.
+        val covered = composite(paintOver = true)
+        assertEquals(25, covered.gray[1 * 8 + 1].toInt() and 255)
+        assertEquals(0, plan(covered)?.drawnGlyphs ?: 0)
+    }
+
+    @Test
     fun fullCacheResetsAndRetriesTheCurrentFrame() {
         val cache = TextureCacheState()
         val large = ImageAtlas.Entry(255, 255, ByteArray(255 * 255) { (it % 15 + 1).toByte() })
