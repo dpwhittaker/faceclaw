@@ -137,6 +137,7 @@ export class FaceclawVoiceControlBridge {
   // listeners. STT capture preempts it — a live assistant/transcribe session
   // owns the single G2 mic and the raw tap is stopped for its duration.
   private readonly rawPcmListeners = new Set<RawPcmListener>();
+  private readonly audioOriginListeners = new Set<(originMs: number, stream: number) => void>();
   private readonly frameMetaListeners = new Set<FrameMetaListener>();
   private rawActive = false;
   // Set when the current capture session runs "my voice only" verification;
@@ -221,6 +222,16 @@ export class FaceclawVoiceControlBridge {
   onRawPcm(listener: RawPcmListener): () => void {
     this.rawPcmListeners.add(listener);
     return () => this.rawPcmListeners.delete(listener);
+  }
+
+  /**
+   * A cloud transcription stream started: its word times count audio from
+   * the PCM chunk delivered at originMs (Date.now() when onRawPcm got it).
+   * Lets a raw-PCM consumer cut out the audio behind transcribed words.
+   */
+  onAudioOrigin(listener: (originMs: number, stream: number) => void): () => void {
+    this.audioOriginListeners.add(listener);
+    return () => this.audioOriginListeners.delete(listener);
   }
 
   /** Subscribe to per-packet firmware DSP metadata (DOA angle + SSR). */
@@ -359,6 +370,7 @@ export class FaceclawVoiceControlBridge {
         this.emitTranscript(event.text, event.isFinal, event),
       onStatus: (status: string) => this.setStatus(status),
       onError: (message: string) => this.setStatus(message),
+      onAudioOrigin: (stream: number, originMs: number) => this.audioOriginListeners.forEach((listener) => listener(originMs, stream)),
     };
     const reconnecting = (create: (options: CloudSttOptions) => CloudSttClient, apiKey: string) =>
       new ReconnectingSttClient(create, { ...sttOptions, apiKey }, () => this.holdsOpenMic());

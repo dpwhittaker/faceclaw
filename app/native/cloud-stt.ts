@@ -29,6 +29,11 @@ export type CloudSttOptions = {
   onError: (message: string) => void;
   onReady?: () => void;
   onDisconnected?: (message: string) => void;
+  /**
+   * The provider's clock for a stream started: its word times count audio
+   * from the chunk captured at originMs (Soniox only).
+   */
+  onAudioOrigin?: (stream: number, originMs: number) => void;
 };
 
 export interface CloudSttClient {

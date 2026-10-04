@@ -62,6 +62,7 @@
       "com/faceclaw/app/AndroidNoiseEffects.java",
       "com/faceclaw/app/FaceclawAudioTranscoder.java",
       "com/faceclaw/app/FaceclawCaptionEngine.java",
+      "com/faceclaw/app/FaceclawCueAudio.java",
       "com/faceclaw/app/FaceclawDiarizer.java",
       "com/faceclaw/app/FaceclawLc3Decoder.java",
       "com/faceclaw/app/FaceclawLlamaRunner.java",
@@ -78,6 +79,7 @@
   {
     "reason": "Android OkHttp backend, Handler/Log delivery, download lifecycle",
     "files": [
+      "com/faceclaw/app/FaceclawFileUpload.java",
       "com/faceclaw/app/FaceclawHttp.java",
       "com/faceclaw/app/FaceclawModelDownloader.java",
       "com/faceclaw/app/FaceclawSseRequest.java",

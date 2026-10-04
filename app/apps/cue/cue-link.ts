@@ -1,11 +1,14 @@
 import { shouldShowNotificationOnGlasses } from "../../native/notification-sources";
 import { onAnySettingChanged } from "../../ui/dashboard-settings";
+import { postAmbientCard } from "../../ui/shell/ambient-cards";
 import { shell } from "../../ui/shell/shell";
-import { CueChannel, type CueChannelEvents, type CueChannelStatus, type CueRecentPerson, type CueTriage } from "./cue-channel";
+import { CueChannel, type CueChannelEvents, type CueChannelStatus, type CueMemoryUpdate, type CueRecentPerson, type CueTriage } from "./cue-channel";
 import { CueCalendarSync } from "./cue-calendar-sync";
+import { CueRecordings } from "./cue-recordings";
 import { cueBackendTokenSetting, cueBackendUrlSetting, cueOrgFor } from "./cue-settings";
 import { CueTermuxSupervisor } from "./cue-termux";
 import { androidCueTransport } from "./cue-transport";
+import { CueVoices } from "./cue-voices";
 import { EntryPopupLayer, type EntryPopup } from "./entry-layer";
 import { notificationId, routeNotification, type FeedNotification } from "./meeting-notifications";
 import { applyLocally, entryOptions, type EntryOption, type Notebook, type NotebookEntry } from "./notebook-view";
@@ -19,17 +22,22 @@ declare const com: any;
  * ones pop up over whatever app is in front. Faceclaw's own notification
  * pop-ups stay off while this runs; if triage hasn't answered within
  * TRIAGE_WAIT_MS (backend down), the message pops up plainly instead.
- * The Cue window's conversations use the same connection.
+ * The Cue window's conversations use the same connection, and recordings
+ * of finished conversations are handed off from here, Cue open or not.
  */
 
 const TRIAGE_WAIT_MS = 60_000;
 const SEEN_KEPT = 500;
 
 /** What the Cue window's conversation half listens for. */
-export type CueConversationHandler = Pick<CueChannelEvents, "onList" | "onPopup" | "onEndContext" | "onAnswer">;
+export type CueConversationHandler = Pick<CueChannelEvents, "onList" | "onPopup" | "onEndContext" | "onAnswer" | "onContextAck" | "onSpeaker">;
+
+const MEMORY_CARD_SECONDS = 10;
 
 class CueLink {
   readonly channel = new CueChannel(androidCueTransport, this.events());
+  readonly voices = new CueVoices((contextId, speaker, seconds, scores) => this.channel.voiceprint(contextId, speaker, seconds, scores));
+  readonly recordings = new CueRecordings(() => this.voices.store());
   private started = false;
   private config = "";
   private status: CueChannelStatus = "offline";
@@ -37,6 +45,7 @@ class CueLink {
   private recentPeople: CueRecentPerson[] = [];
   private books: Notebook[] = [];
   private conversation: CueConversationHandler | null = null;
+  private memory: CueMemoryUpdate | null = null;
   private readonly listeners = new Set<() => void>();
   // Notifications sent to triage, by id, until it answers (or the wait runs out).
   private readonly waiting = new Map<string, ReturnType<typeof setTimeout>>();
@@ -62,6 +71,7 @@ class CueLink {
     com.faceclaw.app.FaceclawNotificationFeed.addListener(this.feedListener);
     this.termux.start();
     this.calendar.start();
+    this.recordings.resume();
   }
 
   /** While Cue handles notifications, Faceclaw's own notification pop-ups stay off. */
@@ -83,6 +93,19 @@ class CueLink {
 
   get notebooks(): Notebook[] {
     return this.books;
+  }
+
+  /** The last memory update this session, until it's undone. */
+  get lastMemoryUpdate(): CueMemoryUpdate | null {
+    return this.memory;
+  }
+
+  /** Undoes the last memory update (the backend reverts its commit and sends the notebooks again). */
+  undoMemoryUpdate(): void {
+    if (!this.memory) return;
+    this.channel.review(this.memory.commit);
+    this.memory = null;
+    this.notify();
   }
 
   setConversationHandler(handler: CueConversationHandler | null): void {
@@ -188,6 +211,7 @@ class CueLink {
   private events(): CueChannelEvents {
     return {
       onStatus: (status, detail) => {
+        if (status === "connected" && this.status !== "connected") this.recordings.retryNow();
         this.status = status;
         this.setDetail(detail);
       },
@@ -204,6 +228,20 @@ class CueLink {
         this.books = notebooks as Notebook[];
         this.notify();
       },
+      onContextAck: (contextId, candidates) => this.conversation?.onContextAck(contextId, candidates),
+      onSpeaker: (speaker) => this.conversation?.onSpeaker(speaker),
+      onMemoryUpdated: (update) => {
+        this.memory = update;
+        const changed = update.files.map(notebookLabel);
+        console.log(`[Cue] memory updated (${update.commit}): ${changed.join(", ")}`);
+        postAmbientCard({
+          id: "cue:memory",
+          title: "Cue remembered",
+          lines: [changed.join(", ") || "No notebooks changed", "Undo it in Cue's menu"],
+          expiresAtMs: Date.now() + MEMORY_CARD_SECONDS * 1000,
+        });
+        this.notify();
+      },
     };
   }
 
@@ -215,6 +253,12 @@ class CueLink {
   private notify(): void {
     for (const listener of this.listeners) listener();
   }
+}
+
+/** "people/priya/notebook.md" → "priya"; "orgs/work/teams/payments/notebook.md" → "payments". */
+function notebookLabel(path: string): string {
+  const parts = path.split("/");
+  return parts[parts.length - 2] ?? path;
 }
 
 function newId(): string {

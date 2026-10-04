@@ -98,7 +98,10 @@ export class SonioxSttClient implements CloudSttClient {
   /** Feed PCM (16 kHz signed-16-bit LE), as raw binary frames. */
   acceptPcm(pcm: Uint8Array, capturedAtMs = Date.now()): void {
     if (this.closed || pcm.length === 0) return;
-    this.audioOriginMs ??= capturedAtMs;
+    if (this.audioOriginMs === null) {
+      this.audioOriginMs = capturedAtMs;
+      this.options.onAudioOrigin?.(this.stream, capturedAtMs);
+    }
     if (this.open) {
       this.sendPcm(pcm);
     } else {

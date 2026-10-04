@@ -42,6 +42,15 @@ export type CuePopup = { id: string; title: string; lines: string[]; priority: s
 /** A notification the backend's triage filed. */
 export type CueTriage = { nid: string; category: "urgent" | "todo" | "status"; notebook: string; entryId: string; line: string; title: string; body: string; app: string };
 
+/** Someone who might be speaking in a context: 1 a participant, 2 on their teams, 3 in the organization. */
+export type CueCandidate = { personId: string; name: string; tier: number };
+/** The backend's name for one of a context's voices; unconfirmed ones show as "Dana?". */
+export type CueSpeaker = { contextId: string; speaker: string; personId: string | null; name: string; confidence: string; confirmed: boolean };
+/** A voice-print's similarity to one candidate ("you" is the wearer). */
+export type CueVoiceScore = { personId: string; similarity: number };
+/** A memory run committed: which notebooks changed, and the speakers it couldn't name. */
+export type CueMemoryUpdate = { contextId: string; commit: string; files: string[]; unknowns: { speaker: string; maybe: string | null }[] };
+
 /** A notification as the backend's triage takes it. */
 export type CueNotificationFrame = {
   nid: string;
@@ -67,6 +76,10 @@ export type CueChannelEvents = {
   onTriage(triage: CueTriage): void;
   /** The backend's notebooks (the frame's `notebooks` array, as sent). */
   onNotebooks(notebooks: unknown[]): void;
+  /** The backend took a context: who might be speaking in it. */
+  onContextAck(contextId: string, candidates: CueCandidate[]): void;
+  onSpeaker(speaker: CueSpeaker): void;
+  onMemoryUpdated(update: CueMemoryUpdate): void;
 };
 
 type Frame = { type: string; [key: string]: unknown };
@@ -157,6 +170,21 @@ export class CueChannel {
 
   statusClear(notebook: string): void {
     this.enqueue({ type: "status-clear", notebook });
+  }
+
+  /** A voice's pooled speech, scored against the context's candidates. */
+  voiceprint(contextId: string, speaker: string, seconds: number, scores: CueVoiceScore[]): void {
+    this.enqueue({ type: "voiceprint", contextId, speaker, seconds: Math.round(seconds * 10) / 10, scores });
+  }
+
+  /** The wearer says who a voice is: a known person, or a new name. */
+  correctSpeaker(contextId: string, speaker: string, personId: string | null, name?: string): void {
+    this.enqueue({ type: "correct-speaker", contextId, speaker, personId: personId ?? undefined, name });
+  }
+
+  /** Undoes a memory update. */
+  review(commit: string): void {
+    this.enqueue({ type: "review", commit, action: "revert" });
   }
 
   /**
@@ -272,6 +300,29 @@ export class CueChannel {
         return;
       case "notebooks":
         this.events.onNotebooks(Array.isArray(frame.notebooks) ? frame.notebooks : []);
+        return;
+      case "context-ack":
+        this.events.onContextAck(String(frame.contextId), Array.isArray(frame.candidates)
+          ? frame.candidates.map((c: any) => ({ personId: String(c.personId), name: String(c.name ?? c.personId), tier: Number(c.tier) || 3 }))
+          : []);
+        return;
+      case "speaker":
+        this.events.onSpeaker({
+          contextId: String(frame.contextId),
+          speaker: String(frame.speaker),
+          personId: frame.personId ? String(frame.personId) : null,
+          name: String(frame.name ?? ""),
+          confidence: String(frame.confidence ?? "low"),
+          confirmed: Boolean(frame.confirmed),
+        });
+        return;
+      case "memory-updated":
+        this.events.onMemoryUpdated({
+          contextId: String(frame.contextId),
+          commit: String(frame.commit),
+          files: Array.isArray(frame.files) ? frame.files.map(String) : [],
+          unknowns: Array.isArray(frame.unknowns) ? frame.unknowns : [],
+        });
         return;
       case "error":
         // A restarted backend has forgotten the session: start it again.

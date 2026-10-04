@@ -1,7 +1,7 @@
 import { GrayImage, imageFromAsciiArt, type UiFont } from "../../graphics/image";
 import { getDefaultSmallFont } from "../../graphics/ui-fonts";
 import { truncateText, wrapText } from "../../graphics/textwrap";
-import { enumSettingMenuItem, textSettingMenuItem } from "../../ui/dashboard-settings";
+import { EditTextSettingLayer, enumSettingMenuItem, textSettingMenuItem } from "../../ui/dashboard-settings";
 import {
   GESTURE_CLICK,
   GESTURE_DOUBLE_CLICK,
@@ -23,8 +23,8 @@ import {
 import { shell } from "../../ui/shell/shell";
 import { formatRelativeTime } from "../../util/date-util";
 import type { CueContext } from "./contexts";
-import { cueSession, type CueCaption, type CueState } from "./cue-session";
-import { cueBackendTokenSetting, cueBackendUrlSetting, cueEmailsSetting, cueOrgSetting, cueTermuxCommandSetting, cueWorkCalendarSetting } from "./cue-settings";
+import { cueSession, type CueCaption, type CueState, type CueVoice } from "./cue-session";
+import { cueBackendTokenSetting, cueBackendUrlSetting, cueEmailsSetting, cueNewPersonSetting, cueOrgSetting, cueTermuxCommandSetting, cueWorkCalendarSetting } from "./cue-settings";
 import type { CueListItem } from "./cue-channel";
 import { cueLink } from "./cue-link";
 import { EntryPopupLayer } from "./entry-layer";
@@ -131,7 +131,8 @@ class CueMainLayer implements Layer {
     image.drawText(font, 12, y, truncateText(font, top, textWidth), 235);
     y += step + 2;
 
-    const problem = !state.listening ? state.status : state.backend !== "connected" ? state.backendDetail : "";
+    const handOff = cueLink.recordings.status().detail;
+    const problem = !state.listening ? state.status : state.backend !== "connected" ? state.backendDetail : handOff.startsWith("Couldn't") ? handOff : "";
     if (problem) {
       image.drawText(font, 12, y, truncateText(font, problem, textWidth), 120);
       y += step;
@@ -397,11 +398,35 @@ function captionRows(font: UiFont, maxWidth: number, captions: CueCaption[]) {
   return rows;
 }
 
-/** Current People: the context's invitees and chosen people, and the voices heard in it. */
+/** "Priya" when confirmed, "Priya?" when the backend isn't sure, else "Voice 2". */
+function voiceName(voice: CueVoice): string {
+  if (!voice.name) return voice.label;
+  return voice.confirmed ? voice.name : `${voice.name}?`;
+}
+
+/**
+ * Current People: the voices heard in the context, then its invitees and
+ * chosen people. Clicking "Dana?" confirms it; clicking any other voice
+ * asks who it is.
+ */
 function peopleMenu(state: CueState): MenuLayer {
   const items: MenuItem[] = [];
   for (const voice of state.voices) {
-    items.push(infoItem(voice.label, `${formatRelativeTime(voice.lastHeardMs)} ago`));
+    const name = voiceName(voice);
+    const unsure = Boolean(voice.name && !voice.confirmed && voice.personId);
+    items.push({
+      label: name,
+      onSelect: (ctx) => {
+        if (unsure) {
+          cueSession.nameVoice(voice.label, voice.personId!, voice.name);
+          ctx.stack.pop();
+        } else {
+          ctx.stack.push(whoMenu(voice.label, name));
+        }
+      },
+      render: ({ image, x, y, width }) => drawRightValueMenuItem(image, getDefaultSmallFont(), x, y, width, name,
+        unsure ? `${GESTURE_CLICK} confirm` : `${formatRelativeTime(voice.lastHeardMs)} ago`),
+    });
   }
   const current = state.current;
   for (const person of current?.people ?? []) items.push(infoItem(person.name, "chosen"));
@@ -419,6 +444,31 @@ function infoItem(label: string, value: string): MenuItem {
     onSelect: () => {},
     render: ({ image, x, y, width }) => drawRightValueMenuItem(image, getDefaultSmallFont(), x, y, width, label, value),
   };
+}
+
+/**
+ * Who's this?: you, the context's candidates (here, team, org), people
+ * from this week, or someone new, whose name is typed on the phone. The
+ * choice names the voice and trains its voice-print.
+ */
+function whoMenu(label: string, shown: string): MenuLayer {
+  const items: MenuItem[] = cueSession.whoChoices().map((choice) => ({
+    label: choice.name,
+    onSelect: (ctx: LayerContext) => {
+      cueSession.nameVoice(label, choice.personId, choice.name);
+      ctx.stack.clearToBase();
+    },
+    render: ({ image, x, y, width }) => drawRightValueMenuItem(image, getDefaultSmallFont(), x, y, width, choice.name, choice.hint),
+  }));
+  items.push({
+    label: "Someone new",
+    onSelect: (ctx) => {
+      cueSession.nameNewVoice(label);
+      void ctx.actions.startTextSettingEdit(cueNewPersonSetting);
+      ctx.stack.push(new EditTextSettingLayer(cueNewPersonSetting));
+    },
+  });
+  return new MenuLayer(`Who's ${shown}?`, items, MENU_LAYOUT);
 }
 
 function switchMenu(): MenuLayer {
@@ -455,6 +505,14 @@ function menuItems(): MenuItem[] {
     },
     { label: "People", onSelect: (ctx) => ctx.stack.push(peopleMenu(cueSession.state())) },
     {
+      label: "Who's this?",
+      disabled: () => !cueSession.state().talkingLabel,
+      onSelect: (ctx) => {
+        const state = cueSession.state();
+        ctx.stack.push(whoMenu(state.talkingLabel, state.talking));
+      },
+    },
+    {
       label: "Notebooks",
       onSelect: (ctx) => ctx.stack.push(new MenuLayer(
         "Notebooks",
@@ -465,6 +523,14 @@ function menuItems(): MenuItem[] {
         })).concat(cueLink.notebooks.length ? [] : [{ label: "Not loaded yet", disabled: true, onSelect: () => {} }]),
         MENU_LAYOUT,
       )),
+    },
+    {
+      label: "Undo last memory update",
+      disabled: () => !cueLink.lastMemoryUpdate,
+      onSelect: (ctx) => {
+        cueLink.undoMemoryUpdate();
+        ctx.stack.clearToBase();
+      },
     },
     {
       label: "End conversation",

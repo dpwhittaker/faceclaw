@@ -43,6 +43,17 @@ export const cueBackendTokenSetting = new ConfigSettingString({
 });
 
 /** The calendar Cue adds work meetings to (from Outlook invitations and reminders), by name. */
+/** Who's this? > Someone new: the name typed on the phone for the voice being named. */
+export const cueNewPersonSetting = new ConfigSettingString({
+  id: "cue-new-person",
+  label: "New person's name",
+  storageKey: "cue.newPerson",
+  defaultValue: "",
+  editorTitle: "Who's this? Their name",
+  glassesEditTitle: "Type their name on the phone",
+  description: "The name of the voice you're naming in Cue.",
+});
+
 export const cueWorkCalendarSetting = new ConfigSettingString({
   id: "cue-work-calendar",
   label: "Work calendar",

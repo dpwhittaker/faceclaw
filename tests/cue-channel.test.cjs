@@ -22,6 +22,9 @@ function harness() {
       onAnswer: (askId, text, done) => events.answers.push([askId, text, done]),
       onTriage: (triage) => (events.triage ??= []).push(triage),
       onNotebooks: (notebooks) => (events.notebooks ??= []).push(notebooks),
+      onContextAck: (contextId, candidates) => (events.acks ??= []).push([contextId, candidates]),
+      onSpeaker: (speaker) => (events.speakers ??= []).push(speaker),
+      onMemoryUpdated: (update) => (events.memory ??= []).push(update),
     },
     (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     () => {},
@@ -157,4 +160,25 @@ test("retargeting starts a fresh session on the new backend and re-announces the
   assert.equal(h.last().url, "ws://new");
   h.last().handlers.onOpen();
   assert.deepEqual(h.types(), ["session-start", "switch"]);
+});
+
+test("voices: candidates and names come back; voice-prints, corrections and undo go out", () => {
+  const h = harness();
+  h.channel.start("ws://backend", "t", "s1", "work");
+  h.channel.voiceprint("c1", "Voice 2", 8.53, [{ personId: "priya", similarity: 0.82 }]);
+  h.last().handlers.onOpen();
+  h.reply({ type: "context-ack", contextId: "c1", candidates: [{ personId: "priya", name: "Priya", tier: 1 }] });
+  h.reply({ type: "speaker", contextId: "c1", speaker: "Voice 2", personId: "priya", name: "Priya", confidence: "medium", confirmed: false });
+  h.reply({ type: "memory-updated", contextId: "c1", commit: "abc123", files: ["people/priya/notebook.md"], unknowns: [] });
+  h.channel.correctSpeaker("c1", "Voice 3", null, "Dana");
+  h.channel.review("abc123");
+  assert.deepEqual(h.events.acks, [["c1", [{ personId: "priya", name: "Priya", tier: 1 }]]]);
+  assert.equal(h.events.speakers[0].name, "Priya");
+  assert.equal(h.events.speakers[0].confirmed, false);
+  assert.equal(h.events.memory[0].commit, "abc123");
+  const sent = h.last().sent.filter((f) => f.type !== "session-start");
+  assert.deepEqual(sent.map((f) => f.type), ["voiceprint", "correct-speaker", "review"]);
+  assert.equal(sent[0].seconds, 8.5);
+  assert.deepEqual(sent[1], { type: "correct-speaker", contextId: "c1", speaker: "Voice 3", name: "Dana", sessionId: "s1" });
+  assert.deepEqual(sent[2], { type: "review", commit: "abc123", action: "revert", sessionId: "s1" });
 });
