@@ -59,7 +59,8 @@ export class WordStudyLayer extends StudyPage {
     });
 
     // This occurrence: the form, its English here, and its parsing explained.
-    blocks.push(this.sectionHeading("here", `In ${formatRef(word.verse)}`, "", true));
+    const where = word.corpus === "lxx" ? `In the Septuagint of ${formatRef(word.verse)}` : `In ${formatRef(word.verse)}`;
+    blocks.push(this.sectionHeading("here", where, "", true));
     if (this.isOpen("here", true)) {
       blocks.push({ spaceBefore: 4, runs: [{ text: word.translit, tone: "bright" }, { text: `  ${word.gloss}`, tone: "body" }] });
       for (const morph of this.hooks.data.morph(word.morph, word.corpus)) {

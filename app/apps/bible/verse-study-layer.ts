@@ -59,8 +59,9 @@ export class VerseStudyLayer extends StudyPage {
     for (const note of study.notes) {
       if (!numbers.has(note.marker)) numbers.set(note.marker, numbers.size + 1);
     }
+    // In a heading the number is the heading's own size, so it stands apart by a space.
     const marker = (at: number): StudyRun[] =>
-      numbers.has(at) ? [{ text: String(numbers.get(at)), tone: "dim", size: "small" }] : [];
+      numbers.has(at) ? [{ text: ` ${numbers.get(at)}`, tone: "dim", size: "small" }] : [];
 
     if (verse?.heading) blocks.push({ runs: [{ text: verse.heading, tone: "dim" }, ...marker(ON_HEADING)] });
     if (verse?.intro) blocks.push({ runs: [{ text: verse.intro, tone: "dim" }, ...marker(ON_INTRO)] });
@@ -163,11 +164,14 @@ export class VerseStudyLayer extends StudyPage {
 
   private addLxx(blocks: StudyBlock[], study: VerseStudy): void {
     const count = study.lxx.reduce((sum, verse) => sum + verse.words.length, 0);
-    blocks.push(this.sectionHeading("lxx", "Septuagint", `${count} words`, true));
+    blocks.push(this.sectionHeading("lxx", "Septuagint", count ? `${count} words` : "", true));
     if (!this.isOpen("lxx", true)) return;
     for (const verse of study.lxx) {
-      blocks.push({ spaceBefore: 6, runs: [{ text: `LXX ${verse.ref}`, tone: "dim" }] });
-      if (verse.english) blocks.push({ spaceBefore: 2, runs: [{ text: verse.english, tone: "body" }] });
+      // A verse the Septuagint lacks has only the sentence saying so.
+      if (verse.ref) blocks.push({ spaceBefore: 6, runs: [{ text: `LXX ${verse.ref}`, tone: "dim" }] });
+      if (verse.english) {
+        blocks.push({ spaceBefore: 2, runs: [{ text: verse.english, tone: verse.ref ? "body" : "dim" }] });
+      }
       for (const word of verse.words) blocks.push(this.wordBlock(word));
     }
   }

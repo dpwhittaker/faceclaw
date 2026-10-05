@@ -243,7 +243,9 @@ def build_lexemes(db, words):
         if normal:
             glosses[lexeme][normal] += 1
         senses[lexeme][dstrong] += 1
-    verse_counts = dict(db.execute("SELECT lexeme, COUNT(DISTINCT verse) FROM words WHERE lexeme != '' GROUP BY lexeme"))
+    # Verses in the Hebrew and Greek texts; the Septuagint's uses are counted on their own.
+    verse_counts = dict(db.execute(
+        "SELECT lexeme, COUNT(DISTINCT verse) FROM words WHERE lexeme != '' AND corpus != 2 GROUP BY lexeme"))
     sense_gloss = dict(db.execute("SELECT dstrong, gloss FROM lexicon"))
     rows = []
     for lexeme, verse_count in verse_counts.items():
@@ -265,11 +267,7 @@ def build_morph(db):
 
 
 def build_lxx(db, verses):
-    try:
-        import lxx  # noqa: F401
-    except ImportError:
-        log("Septuagint: lxx.py not present yet, skipped")
-        return
+    import lxx
     lxx.build(db, verses, log)
 
 
