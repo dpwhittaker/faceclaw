@@ -2,6 +2,7 @@ import { type GrayImage, type UiFont } from "../../graphics/image";
 import { truncateLeft, truncateText, wrapText } from "../../graphics/textwrap";
 import { getDefaultLargeFont, getDefaultMediumFont, getDefaultSmallFont } from "../../graphics/ui-fonts";
 import {
+  directionalFallback,
   GESTURE_CLICK,
   GESTURE_DOUBLE_CLICK,
   GESTURE_LONG_PRESS,
@@ -10,6 +11,8 @@ import {
   GESTURE_SHORT_THEN_LONG_PRESS,
   gestureHints,
   type InputEvent,
+  type InputSource,
+  isDirectionalInput,
 } from "../gestures";
 import { Layer, type LayerActions, type LayerContext } from "../layers";
 import { drawSelectionHighlight } from "../menu";
@@ -53,12 +56,22 @@ const KEY_TAP = 255;
 const KEY_OTHER = 175;
 
 /**
- * One swipe on the R1 can arrive as two to four swipe reports 60-130 ms apart
- * with no new touch between them, while two deliberate swipes (each needing a
- * touch of its own) were never closer than 510 ms. Each extra report would zoom
- * one more level, so swipes this close to the previous one are dropped.
+ * One swipe on the R1 can arrive as two to four swipe reports 60-130 ms apart,
+ * and each extra report would zoom one more level. Every touch of the ring
+ * sends a ring-press first, so a report after a fresh touch is a new swipe
+ * however fast the typing; repeats have none. A ring swipe without a ring-press
+ * since the last report (firmware that doesn't forward ring-press) counts as
+ * new only once the previous report is this old.
  */
 const SWIPE_REPEAT_MS = 250;
+
+/**
+ * A swipe carried on past its first report keeps sending them: three or four
+ * when swiping and holding, against at most two for an ordinary swipe (4 of 35
+ * in a typing session sent a second). The report that reaches this count, with
+ * a single key in view, types that key as a capital.
+ */
+const HELD_SWIPE_REPORTS = 3;
 
 /** Tabs have no glyph; show them as the Tab key's label. */
 function displayText(text: string): string {
@@ -70,23 +83,32 @@ function displayText(text: string): string {
  * the ring alone, no phone or microphone. The keyboard is a three-way tree
  * (see trinary-keyboard.ts) drawn as three boxes — swipe up zooms into the
  * top one, swipe down the bottom one, tap the middle one or types it when it
- * is a single key; long-press types that key as a capital; double-tap zooms
+ * is a single key; long-press types that key as a capital, and so does
+ * swiping into a top or bottom key and holding the swipe; double-tap zooms
  * out; tap-then-hold deletes the last character. Double-tap at the outermost
  * level shows the same send / discard menu as the voice and phone keyboard
  * dialogs, plus Keep typing; double-tap there (or Keep typing) returns to the
  * keyboard, so a stray double-tap never throws away what was typed.
  *
- * Long-press and tap-then-hold reach this layer only because it claims them
- * (acceptsHoldGestures); over every other overlay the shell keeps them.
+ * Long-press, tap-then-hold and ring-press reach this layer only because it
+ * claims them (acceptsHoldGestures, acceptsRingPress); over every other
+ * overlay the shell keeps them. Watch swipes arrive as directions
+ * (acceptsDirectional): right types or zooms like a tap, left zooms out.
  */
 export class TextInputLayer implements Layer {
   readonly acceptsHoldGestures = true;
+  readonly acceptsRingPress = true;
+  readonly acceptsDirectional = true;
   private readonly keyboard = new TrinaryKeyboard();
   private text = "";
   private phase: "keyboard" | "menu" = "keyboard";
   private menuIndex: number;
-  /** When the last swipe was taken (see SWIPE_REPEAT_MS). */
-  private lastSwipeAtMs = -Infinity;
+  /** A ring-press arrived since the last ring swipe report (see SWIPE_REPEAT_MS). */
+  private touchedSinceSwipe = false;
+  private lastRingSwipeAtMs = -Infinity;
+  /** The swipe in progress and how many reports it has sent (see HELD_SWIPE_REPORTS). */
+  private swipeType: "scroll-up" | "scroll-down" | null = null;
+  private swipeReports = 0;
 
   private readonly actions: LayerActions;
   private readonly onClosed: () => void;
@@ -110,9 +132,19 @@ export class TextInputLayer implements Layer {
   }
 
   handleInput(event: InputEvent, _ctx: LayerContext): void {
-    if (event.type === "scroll-up" || event.type === "scroll-down") {
-      if (event.timestampMs - this.lastSwipeAtMs < SWIPE_REPEAT_MS) return;
-      this.lastSwipeAtMs = event.timestampMs;
+    if (event.type === "ring-press") {
+      this.touchedSinceSwipe = true;
+      return;
+    }
+    if (isDirectionalInput(event)) {
+      event = directionalFallback(event);
+    } else if (event.type === "scroll-up" || event.type === "scroll-down") {
+      if (!this.isNewSwipe(event)) {
+        this.continueSwipe(event.type);
+        return;
+      }
+      this.swipeType = event.type;
+      this.swipeReports = 1;
     }
     if (this.phase === "menu") {
       this.handleMenuInput(event);
@@ -143,6 +175,25 @@ export class TextInputLayer implements Layer {
         return;
       default:
         return;
+    }
+  }
+
+  /** Whether a swipe report starts a new swipe, rather than the R1 repeating the last one. */
+  private isNewSwipe(event: { source?: InputSource; timestampMs: number }): boolean {
+    // Temple swipes don't repeat and never send ring-press.
+    if (event.source === "left-arm" || event.source === "right-arm") return true;
+    const fresh = this.touchedSinceSwipe || event.timestampMs - this.lastRingSwipeAtMs >= SWIPE_REPEAT_MS;
+    this.touchedSinceSwipe = false;
+    this.lastRingSwipeAtMs = event.timestampMs;
+    return fresh;
+  }
+
+  /** Another report for the swipe in progress: a held swipe into a single key types its capital. */
+  private continueSwipe(type: "scroll-up" | "scroll-down"): void {
+    if (type !== this.swipeType) return;
+    this.swipeReports++;
+    if (this.swipeReports === HELD_SWIPE_REPORTS && this.phase === "keyboard" && this.keyboard.current().kind === "key") {
+      this.apply(this.keyboard.tap(true));
     }
   }
 

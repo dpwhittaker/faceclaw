@@ -108,6 +108,12 @@ export interface Layer {
    */
   readonly acceptsHoldGestures?: boolean;
   /**
+   * True when handleInput wants the ring's raw touch-down (ring-press), which
+   * the shell otherwise delivers only to windows. Sent while this is the top
+   * shell overlay.
+   */
+  readonly acceptsRingPress?: boolean;
+  /**
    * A touch at (x, y) in this layer's own canvas coordinates, from the phone's
    * mirror view. Return true if the layer acted on it (selected / opened what
    * is there); false sends a plain select (click) instead.

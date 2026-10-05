@@ -747,6 +747,11 @@ class Shell {
     // Touch-down supplements gestures. It must not wake the screen, operate
     // menus, or cancel the hold-to-escape timer. Apps can opt into it later.
     if (event.type === "ring-press") {
+      // The ring keyboard tells one swipe from the next by the touch that starts each.
+      if (this.screenOn && !this.stack.isAtBase() && this.stack.topMatches((layer) => layer.acceptsRingPress === true)) {
+        await this.stack.handleInput(event);
+        return { shell: false, window: false };
+      }
       const window = this.foregroundWindow();
       if (this.screenOn && this.focus === "window" && this.stack.isAtBase() && window) {
         await window.handleInput(event, frameId);

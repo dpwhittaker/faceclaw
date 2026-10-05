@@ -53,7 +53,7 @@ test('press is observed before routing and does not wake, operate shell menus or
   for (const screenOn of [true, false]) for (const focus of ['window', 'sidebar']) for (const atBase of [true, false]) {
     const s = new Shell(), seen = [], delivered = [];
     const unsubscribe = monitor.addInputListener((e) => seen.push(e));
-    Object.assign(s, { screenOn, focus, stack: { isAtBase: () => atBase },
+    Object.assign(s, { screenOn, focus, stack: { isAtBase: () => atBase, topMatches: () => false },
       foregroundWindow: () => ({ handleInput(e) { assert.equal(seen.length, 1); delivered.push(e); } }),
       syncInputFocus() {}, lastInput: event('long-press'), lastInputAtMs: 123 });
     try {

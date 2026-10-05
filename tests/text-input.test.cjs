@@ -176,7 +176,7 @@ function dialog(targets = ['app', 'assistant']) {
   stack.push(layer);
   // Deliberate gestures, spaced as a person makes them (the dialog drops swipe repeats).
   let clock = 1_000_000;
-  const at = (type, gapMs = 600) => ({ ...gestures.makeInputEvent({ type, source: 'ring' }), timestampMs: clock += gapMs });
+  const at = (type, gapMs = 600, source = 'ring') => ({ ...gestures.makeInputEvent({ type, source }), timestampMs: clock += gapMs });
   const input = async (...types) => {
     for (const type of types) await stack.handleInput(at(type));
   };
@@ -197,15 +197,49 @@ test('the dialog types with the ring, capitalizes on long-press and deletes on t
   assert.equal(d.layer.getText(), '');
 });
 
-test('the extra swipe reports one R1 swipe can send are dropped, so a swipe zooms one level', async () => {
+test('each touch starts a new swipe however fast; the extra reports of one R1 swipe are dropped', async () => {
   const d = dialog();
-  const swipe = (type, gapMs) => d.stack.handleInput(d.at(type, gapMs));
-  await swipe('scroll-up');            // into b a c / d e f / g h j
-  await swipe('scroll-up', 90);        // the ring repeating that swipe
-  await swipe('scroll-up', 90);
-  await swipe('scroll-down', 600);     // a deliberate swipe: g h j
-  await d.input('click');              // h, the middle key
+  const send = (type, gapMs, source) => d.stack.handleInput(d.at(type, gapMs, source));
+  await send('ring-press', 600); await send('scroll-up', 150);   // into b a c / d e f / g h j
+  await send('scroll-up', 90); await send('scroll-up', 90);      // the ring repeating that swipe
+  await send('ring-press', 60); await send('scroll-down', 100);  // a new touch, 160 ms after the last report: g h j
+  await send('click', 400);                                      // h, the middle key
   assert.equal(d.layer.getText(), 'h');
+});
+
+test('a held swipe into a top or bottom key types its capital; a swipe with one repeat does not', async () => {
+  const d = dialog();
+  const send = (type, gapMs) => d.stack.handleInput(d.at(type, gapMs));
+  // Into b a c / d e f / g h j, then g h j: a group, so repeats only zoom once.
+  await send('ring-press', 600); await send('scroll-up', 150); await send('scroll-up', 90); await send('scroll-up', 90);
+  await send('ring-press', 600); await send('scroll-down', 150);
+  // Swipe up into g and hold: the third report types G.
+  await send('ring-press', 600); await send('scroll-up', 150); await send('scroll-up', 90); await send('scroll-up', 90);
+  assert.equal(d.layer.getText(), 'G');
+  await send('scroll-up', 90);                                   // a fourth report types nothing more
+  assert.equal(d.layer.getText(), 'G');
+  assert.ok(d.layer.keyboard.isAtHome());
+  // An ordinary swipe that sends one repeat just shows the key; a tap types it.
+  await send('ring-press', 600); await send('scroll-up', 150);
+  await send('ring-press', 600); await send('scroll-down', 150);
+  await send('ring-press', 600); await send('scroll-up', 150); await send('scroll-up', 90);
+  assert.equal(d.layer.getText(), 'G');
+  await send('click', 600);
+  assert.equal(d.layer.getText(), 'Gg');
+});
+
+test('without ring-press a ring swipe is new once the last report is 250 ms old; watch swipes are never dropped', async () => {
+  const d = dialog();
+  const send = (type, gapMs, source) => d.stack.handleInput(d.at(type, gapMs, source));
+  await send('scroll-up', 600); await send('scroll-up', 90);     // firmware without ring-press: a swipe and a repeat
+  await send('scroll-down', 600); await send('click', 600);      // g h j, then h
+  // The watch: up, up (top box, then its top row), right types the middle key.
+  await send('swipe-up', 600, 'watch'); await send('swipe-up', 90, 'watch'); await send('swipe-right', 400, 'watch');
+  assert.equal(d.layer.getText(), 'ha');
+  await send('swipe-left', 600, 'watch');                        // back out to the root, as double-tap
+  await send('swipe-left', 600, 'watch');                        // and on to the send menu
+  await send('swipe-right', 600, 'watch');                       // Type Into App
+  assert.deepEqual(plain(d.sent), [['app', 'ha']]);
 });
 
 test('double-tap past the root opens the menu; double-tap there keeps typing; a send delivers the trimmed text', async () => {
@@ -274,7 +308,9 @@ test('Text input in the system menu opens the ring keyboard over the window, whi
   assert.equal(shell.focus, 'window');
   let clock = 1_000_000;
   const send = (type) => shell.receiveInput({ ...gestures.makeInputEvent({ type, source: 'ring' }), timestampMs: clock += 600 });
-  for (const type of ['scroll-up', 'scroll-down', 'long-press']) await send(type);   // H, a long-press through the shell
+  await send('ring-press');
+  assert.equal(shell.stack.layers.at(-1).touchedSinceSwipe, true);                     // the shell routed the touch to the keyboard
+  for (const type of ['scroll-up', 'scroll-down', 'long-press']) await send(type);    // H, a long-press through the shell
   for (const type of ['click', 'scroll-up', 'click']) await send(type);              // i
   for (const type of ['scroll-up', 'click', 'click', 'short-then-long-press']) await send(type); // e, deleted
   for (const type of ['double-click', 'double-click', 'click']) await send(type);    // menu, Type Into App
