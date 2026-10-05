@@ -174,10 +174,13 @@ function dialog(targets = ['app', 'assistant']) {
     defaultTargetIndex: 0,
   });
   stack.push(layer);
+  // Deliberate gestures, spaced as a person makes them (the dialog drops swipe repeats).
+  let clock = 1_000_000;
+  const at = (type, gapMs = 600) => ({ ...gestures.makeInputEvent({ type, source: 'ring' }), timestampMs: clock += gapMs });
   const input = async (...types) => {
-    for (const type of types) await stack.handleInput(gestures.makeInputEvent({ type, source: 'ring' }));
+    for (const type of types) await stack.handleInput(at(type));
   };
-  return { stack, layer, sent, input, closed: () => closed, renders: () => renders };
+  return { stack, layer, sent, input, at, closed: () => closed, renders: () => renders };
 }
 
 test('the dialog types with the ring, capitalizes on long-press and deletes on tap-then-hold', async () => {
@@ -192,6 +195,17 @@ test('the dialog types with the ring, capitalizes on long-press and deletes on t
   assert.equal(d.layer.getText(), 'Hi');
   await d.input('short-then-long-press', 'short-then-long-press', 'short-then-long-press');
   assert.equal(d.layer.getText(), '');
+});
+
+test('the extra swipe reports one R1 swipe can send are dropped, so a swipe zooms one level', async () => {
+  const d = dialog();
+  const swipe = (type, gapMs) => d.stack.handleInput(d.at(type, gapMs));
+  await swipe('scroll-up');            // into b a c / d e f / g h j
+  await swipe('scroll-up', 90);        // the ring repeating that swipe
+  await swipe('scroll-up', 90);
+  await swipe('scroll-down', 600);     // a deliberate swipe: g h j
+  await d.input('click');              // h, the middle key
+  assert.equal(d.layer.getText(), 'h');
 });
 
 test('double-tap past the root opens the menu; double-tap there keeps typing; a send delivers the trimmed text', async () => {
@@ -258,7 +272,8 @@ test('Text input in the system menu opens the ring keyboard over the window, whi
   entry.onSelect({ stack: shell.stack, actions: layers.noopLayerActions });
   assert.ok(shell.stack.topMatches((layer) => layer instanceof textInput.TextInputLayer));
   assert.equal(shell.focus, 'window');
-  const send = (type) => shell.receiveInput(gestures.makeInputEvent({ type, source: 'ring' }));
+  let clock = 1_000_000;
+  const send = (type) => shell.receiveInput({ ...gestures.makeInputEvent({ type, source: 'ring' }), timestampMs: clock += 600 });
   for (const type of ['scroll-up', 'scroll-down', 'long-press']) await send(type);   // H, a long-press through the shell
   for (const type of ['click', 'scroll-up', 'click']) await send(type);              // i
   for (const type of ['scroll-up', 'click', 'click', 'short-then-long-press']) await send(type); // e, deleted

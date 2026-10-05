@@ -52,6 +52,14 @@ const BOX_GESTURES = [GESTURE_SCROLL_UP, GESTURE_CLICK, GESTURE_SCROLL_DOWN] as 
 const KEY_TAP = 255;
 const KEY_OTHER = 175;
 
+/**
+ * One swipe on the R1 can arrive as two to four swipe reports 60-130 ms apart
+ * with no new touch between them, while two deliberate swipes (each needing a
+ * touch of its own) were never closer than 510 ms. Each extra report would zoom
+ * one more level, so swipes this close to the previous one are dropped.
+ */
+const SWIPE_REPEAT_MS = 250;
+
 /** Tabs have no glyph; show them as the Tab key's label. */
 function displayText(text: string): string {
   return text.replace(/\t/g, "↦");
@@ -77,6 +85,8 @@ export class TextInputLayer implements Layer {
   private text = "";
   private phase: "keyboard" | "menu" = "keyboard";
   private menuIndex: number;
+  /** When the last swipe was taken (see SWIPE_REPEAT_MS). */
+  private lastSwipeAtMs = -Infinity;
 
   private readonly actions: LayerActions;
   private readonly onClosed: () => void;
@@ -100,6 +110,10 @@ export class TextInputLayer implements Layer {
   }
 
   handleInput(event: InputEvent, _ctx: LayerContext): void {
+    if (event.type === "scroll-up" || event.type === "scroll-down") {
+      if (event.timestampMs - this.lastSwipeAtMs < SWIPE_REPEAT_MS) return;
+      this.lastSwipeAtMs = event.timestampMs;
+    }
     if (this.phase === "menu") {
       this.handleMenuInput(event);
       return;
