@@ -170,10 +170,11 @@ const inputDialog = load('app/ui/shell/input-dialog.ts', {
   '../../graphics/image': graphics, '../../graphics/textwrap': textwrap, '../../graphics/ui-fonts': fonts,
   '../menu': menu, '../metrics': metrics, './geometry': { MIN_WINDOW_HEIGHT: 288, minWindowTop: () => 96 },
 });
+const swipeFilter = load('app/ui/ring-swipe-filter.ts');
 const { TextInputLayer } = load('app/ui/shell/text-input.ts', {
   '../../graphics/image': graphics, '../../graphics/textwrap': textwrap, '../../graphics/ui-fonts': fonts,
   '../gestures': gestures, '../layers': layers, '../menu': menu, './input-dialog': inputDialog,
-  './trinary-keyboard': kb,
+  './trinary-keyboard': kb, '../ring-swipe-filter': swipeFilter,
 });
 
 function dialog(targets = ['app', 'assistant']) {
@@ -306,7 +307,7 @@ test('Text input in the system menu opens the ring keyboard over the window, whi
   const textInput = load('app/ui/shell/text-input.ts', {
     '../../graphics/image': graphics, '../../graphics/textwrap': textwrap, '../../graphics/ui-fonts': fonts,
     '../gestures': gestures, '../layers': layers, '../menu': menu, './input-dialog': inputDialog,
-    './trinary-keyboard': kb,
+    './trinary-keyboard': kb, '../ring-swipe-filter': swipeFilter,
   });
   const { shell } = load('app/ui/shell/shell.ts', {
     '../../graphics/image': graphics, '../layers': layers, '../menu': menu, '../gestures': gestures,
@@ -326,7 +327,7 @@ test('Text input in the system menu opens the ring keyboard over the window, whi
   let clock = 1_000_000;
   const send = (type) => shell.receiveInput({ ...gestures.makeInputEvent({ type, source: 'ring' }), timestampMs: clock += 600 });
   await send('ring-press');
-  assert.equal(shell.stack.layers.at(-1).touchedSinceSwipe, true);                     // the shell routed the touch to the keyboard
+  assert.equal(shell.stack.layers.at(-1).swipeFilter.touchedSinceSwipe, true);                    // the shell routed the touch to the keyboard
   for (const type of ['long-press', 'click', 'scroll-up', 'scroll-up']) await send(type); // shift (through the shell), H
   for (const type of ['scroll-up', 'scroll-down', 'scroll-up']) await send(type);    // i
   for (const type of ['scroll-up', 'scroll-up', 'scroll-down', 'short-then-long-press']) await send(type); // e, deleted

@@ -11,10 +11,10 @@ import {
   GESTURE_SHORT_THEN_LONG_PRESS,
   gestureHints,
   type InputEvent,
-  type InputSource,
   isDirectionalInput,
 } from "../gestures";
 import { Layer, type LayerActions, type LayerContext } from "../layers";
+import { RingSwipeFilter } from "../ring-swipe-filter";
 import { drawSelectionHighlight } from "../menu";
 import { inputDialogRect, paintInputDialog, paintInputDialogBox } from "./input-dialog";
 import {
@@ -56,16 +56,6 @@ const BOX_GESTURES = [GESTURE_SCROLL_UP, GESTURE_CLICK, GESTURE_SCROLL_DOWN] as 
 const KEY_ACTIVE = 255;
 const KEY_INACTIVE = 95;
 
-/**
- * One swipe on the R1 can arrive as two to four swipe reports 60-130 ms apart,
- * and each extra report would zoom one more level. Every touch of the ring
- * sends a ring-press first, so a report after a fresh touch is a new swipe
- * however fast the typing; repeats have none. A ring swipe without a ring-press
- * since the last report (firmware that doesn't forward ring-press) counts as
- * new only once the previous report is this old.
- */
-const SWIPE_REPEAT_MS = 250;
-
 /** Shift: off, for the next character (one long-press), or locked (two). */
 type ShiftState = "off" | "once" | "lock";
 
@@ -101,9 +91,7 @@ export class TextInputLayer implements Layer {
   private phase: "keyboard" | "menu" = "keyboard";
   private menuIndex: number;
   private shift: ShiftState = "off";
-  /** A ring-press arrived since the last ring swipe report (see SWIPE_REPEAT_MS). */
-  private touchedSinceSwipe = false;
-  private lastRingSwipeAtMs = -Infinity;
+  private readonly swipeFilter = new RingSwipeFilter();
 
   private readonly actions: LayerActions;
   private readonly onClosed: () => void;
@@ -127,13 +115,9 @@ export class TextInputLayer implements Layer {
   }
 
   handleInput(event: InputEvent, _ctx: LayerContext): void {
-    if (event.type === "ring-press") {
-      this.touchedSinceSwipe = true;
-      return;
-    }
     if (isDirectionalInput(event)) {
       event = directionalFallback(event);
-    } else if ((event.type === "scroll-up" || event.type === "scroll-down") && !this.isNewSwipe(event)) {
+    } else if (!this.swipeFilter.accept(event)) {
       return;
     }
     if (this.phase === "menu") {
@@ -168,16 +152,6 @@ export class TextInputLayer implements Layer {
       default:
         return;
     }
-  }
-
-  /** Whether a swipe report starts a new swipe, rather than the R1 repeating the last one. */
-  private isNewSwipe(event: { source?: InputSource; timestampMs: number }): boolean {
-    // Temple swipes don't repeat and never send ring-press.
-    if (event.source === "left-arm" || event.source === "right-arm") return true;
-    const fresh = this.touchedSinceSwipe || event.timestampMs - this.lastRingSwipeAtMs >= SWIPE_REPEAT_MS;
-    this.touchedSinceSwipe = false;
-    this.lastRingSwipeAtMs = event.timestampMs;
-    return fresh;
   }
 
   private apply(outcome: KeyboardOutcome): void {
