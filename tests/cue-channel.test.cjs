@@ -6,7 +6,7 @@ const { CueChannel } = require("../.test-build/app/apps/cue/cue-channel.js");
 function harness() {
   const sockets = [];
   const timers = [];
-  const events = { status: [], lists: [], popups: [], ends: [], answers: [], recent: [] };
+  const events = { status: [], cues: [], ends: [], answers: [], recent: [] };
   const channel = new CueChannel(
     (url, token, handlers) => {
       const socket = { url, token, handlers, sent: [], open: true, send(text) { if (!this.open) return false; this.sent.push(JSON.parse(text)); return true; }, close() { this.open = false; } };
@@ -16,8 +16,7 @@ function harness() {
     {
       onStatus: (status, detail) => events.status.push([status, detail]),
       onRecent: (recent) => events.recent.push(recent),
-      onList: (contextId, items) => events.lists.push([contextId, items]),
-      onPopup: (popup) => events.popups.push(popup),
+      onCue: (cue) => events.cues.push(cue),
       onEndContext: (contextId, reason) => events.ends.push([contextId, reason]),
       onAnswer: (askId, text, done) => events.answers.push([askId, text, done]),
       onTriage: (triage) => (events.triage ??= []).push(triage),
@@ -104,13 +103,11 @@ test("backend frames reach the app", () => {
   h.channel.start("ws://backend", "t", "s1", "");
   h.last().handlers.onOpen();
   h.reply({ type: "session-ack", recent: [{ personId: "priya", name: "Priya", team: "", lastTalked: 5 }] });
-  h.reply({ type: "list", contextId: "c1", rev: 1, items: [{ id: "x", rank: 1, title: "T", detail: "", label: "" }] });
-  h.reply({ type: "popup", id: "p", title: "Heads up", lines: ["a"], priority: "high", seconds: 8 });
+  h.reply({ type: "cue", contextId: "c1", notebook: "work", entryId: "c:c1/x", category: "urgent", line: "That's Dana", title: "1:1 with Tom", detail: "Tom's new lead" });
   h.reply({ type: "end-context", contextId: "c1", reason: "wrap-up" });
   h.reply({ type: "answer", askId: "a1", text: "Because.", done: true });
   assert.equal(h.events.recent[0][0].name, "Priya");
-  assert.equal(h.events.lists[0][1][0].id, "x");
-  assert.equal(h.events.popups[0].seconds, 8);
+  assert.deepEqual([h.events.cues[0].entryId, h.events.cues[0].category, h.events.cues[0].detail], ["c:c1/x", "urgent", "Tom's new lead"]);
   assert.deepEqual(h.events.ends[0], ["c1", "wrap-up"]);
   assert.deepEqual(h.events.answers[0], ["a1", "Because.", true]);
 });

@@ -6,7 +6,7 @@ import { onAnySettingChanged } from "../../ui/dashboard-settings";
 import { postAmbientCard, dismissAmbientCard } from "../../ui/shell/ambient-cards";
 import type { LayerActions } from "../../ui/layers";
 import { currentEvent, eventsOnNow, EARLY_JOIN_MS, occurrenceKey, seriesKey } from "./calendar-context";
-import { type CueChannelStatus, type CueEventFrame, type CueListItem } from "./cue-channel";
+import { type CueChannelStatus, type CueEventFrame } from "./cue-channel";
 import { cueLink } from "./cue-link";
 import { ASK_GRACE_MS, CueContexts, type CueChange, type CueContext, type CueSwitchTarget } from "./contexts";
 import type { VoiceName } from "./after-conversation";
@@ -61,8 +61,6 @@ export type CueState = {
   talkingLabel: string;
   /** Voices heard in the current context, most recent first. */
   voices: CueVoice[];
-  /** The backend's list for the current context. */
-  items: CueListItem[];
   captions: CueCaption[];
   answers: ReadonlyMap<string, CueAnswer>;
   /** People and teams from the last 7 days, from the backend. */
@@ -82,7 +80,6 @@ class CueSession {
   private partial: CueCaption[] = [];
   // Per context: voices by stream:label, numbered in the order first heard.
   private readonly voices = new Map<string, Map<string, CueVoice>>();
-  private readonly items = new Map<string, CueListItem[]>();
   private readonly answers = new Map<string, CueAnswer>();
   private talking = "";
   private talkingAtMs = 0;
@@ -103,13 +100,6 @@ class CueSession {
     if (this.actions) return;
     this.actions = actions;
     cueLink.setConversationHandler({
-      onList: (contextId, items) => {
-        this.items.set(contextId, items);
-        this.notify();
-      },
-      onPopup: (popup) => {
-        postAmbientCard({ id: `cue:${popup.id}`, title: popup.title, lines: popup.lines, expiresAtMs: Date.now() + popup.seconds * 1000 });
-      },
       onEndContext: (contextId) => {
         if (this.contexts.current?.id === contextId) this.apply(this.contexts.end(Date.now(), "claude"));
       },
@@ -183,7 +173,6 @@ class CueSession {
       talking: current && this.talking ? this.displayName(current.id, this.talking, this.talkingAtMs) : "",
       talkingLabel: current ? this.talking : "",
       voices,
-      items: current ? this.items.get(current.id) ?? [] : [],
       captions: [...this.captions, ...this.partial].map((caption) => (caption.speaker ? { ...caption, speaker: this.displayName(caption.contextId, caption.speaker, caption.atMs) } : caption)),
       answers: this.answers,
       recent: this.recent(),
@@ -276,7 +265,7 @@ class CueSession {
     this.notify();
   }
 
-  /** Asks the backend about an item (or the conversation); returns the id its answer arrives under. */
+  /** Asks the backend about a cue (by entry id) or the conversation; returns the id its answer arrives under. */
   ask(itemId: string | undefined, question: string): string | null {
     const current = this.contexts.current;
     if (!current) return null;
@@ -431,7 +420,6 @@ class CueSession {
           this.streams.delete(context.id);
           if (this.naming?.contextId === context.id) this.naming = null;
           this.voices.delete(context.id);
-          this.items.delete(context.id);
           this.talking = "";
           break;
         case "ask-ended":

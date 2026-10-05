@@ -3,7 +3,8 @@ const assert = require("node:assert/strict");
 
 const { notificationId, parseInvitation, routeNotification } = require("../.test-build/app/apps/cue/meeting-notifications.js");
 const { normalizeTitle, planMeeting } = require("../.test-build/app/apps/cue/meeting-sync.js");
-const { applyLocally, entryOptions, idleNotebookNames, idleRows } = require("../.test-build/app/apps/cue/notebook-view.js");
+const { applyLocally, cueLine, entryOptions, entryRows, idleNotebookNames } = require("../.test-build/app/apps/cue/notebook-view.js");
+const { parseResponses } = require("../.test-build/app/apps/cue/notification-responses.js");
 
 const local = (y, mo, d, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime();
 const NNBSP = " ";
@@ -89,7 +90,8 @@ test("Teams' started notice matches a meeting that started a little earlier", ()
 function notebook(name, entries, status = []) {
   return { name, label: name[0].toUpperCase() + name.slice(1), entries, status, statusCount: status.length };
 }
-const entry = (id, category, day, text, extra = {}) => ({ id, section: category === "status" ? "status" : "day", day, category, firstCategory: category, text, nid: id, title: "", body: "", ...extra });
+const entry = (id, category, day, text, extra = {}) => ({ id, section: category === "status" ? "status" : "day", day, category, firstCategory: category, text, nid: id, contextId: null, title: "", body: "", ...extra });
+const cue = (id, category, text) => entry(`c:ctx/${id}`, category, category === "status" ? null : "2026-09-28", `${category === "status" ? "09-28 " : ""}10:00 ${text} · 1:1 with Tom`, { nid: null, contextId: "ctx", title: "1:1 with Tom" });
 
 test("idle view: Work on weekdays 8-6, everything else combined otherwise", () => {
   const notebooks = [notebook("work", []), notebook("church", []), notebook("theater", []), notebook("general", [])];
@@ -98,19 +100,46 @@ test("idle view: Work on weekdays 8-6, everything else combined otherwise", () =
   assert.deepEqual(idleNotebookNames(notebooks, local(2026, 10, 3, 10, 0)), ["church", "theater", "general"], "Saturday");
 });
 
-test("idle rows: newest day first, icons, notebook names when combined, then the status line", () => {
+test("rows: urgent, then todo, then what the memory run kept, newest day first, then the status line", () => {
   const church = notebook("church", [entry("c1", "todo", "2026-09-29", "18:00 Pastor Dan · lead prayer Sunday?")], [entry("s1", "status", null, "09-30 07:00 Church Center · Bulletin")]);
-  const general = notebook("general", [entry("g1", "urgent", "2026-09-30", "08:15 Amy · pick up Sam at 3"), { ...entry("g2", null, "2026-09-30", "- dentist moved"), nid: null }]);
-  const rows = idleRows([church, general], ["church", "general"]);
-  assert.deepEqual(rows.map((r) => r.text), ["‼ General: Amy · pick up Sam at 3", "  General: - dentist moved", "◆ Church: Pastor Dan · lead prayer Sunday?", "1 status message"]);
-  assert.deepEqual(idleRows([church], ["church"]).map((r) => r.text)[0], "◆ Pastor Dan · lead prayer Sunday?");
+  const general = notebook("general", [{ ...entry("g2", null, "2026-09-30", "- dentist moved"), nid: null }, entry("g1", "urgent", "2026-09-29", "08:15 Amy · pick up Sam at 3"), entry("g3", "todo", "2026-09-30", "09:00 Pay the water bill")]);
+  const rows = entryRows([church, general], ["church", "general"]);
+  assert.deepEqual(rows.map((r) => r.text), ["‼ General: Amy · pick up Sam at 3", "◆ General: Pay the water bill", "◆ Church: Pastor Dan · lead prayer Sunday?", "  General: - dentist moved", "1 status message"]);
+  assert.deepEqual(entryRows([church], ["church"]).map((r) => r.text)[0], "◆ Pastor Dan · lead prayer Sunday?");
 });
 
-test("each category's options, and conversation entries just dismiss", () => {
-  assert.deepEqual(entryOptions("urgent").map((o) => o.label), ["Urgent – Dismiss", "Urgent – TODO", "Not urgent – TODO", "Not urgent – Status"]);
-  assert.deepEqual(entryOptions("todo").map((o) => [o.action, o.to]), [["dismiss", undefined], ["move", "urgent"], ["move", "status"]]);
-  assert.deepEqual(entryOptions("status").map((o) => o.label), ["Status – Dismiss", "Not status – TODO", "Not status – Urgent"]);
-  assert.deepEqual(entryOptions(null).map((o) => o.label), ["Dismiss"]);
+test("in a conversation its cues come first, status ones too, from whichever notebook", () => {
+  const work = notebook("work",
+    [entry("w1", "urgent", "2026-09-28", "09:00 Ivana · refresh failed"), cue("rfc", "todo", "You owe Priya an RFC review"), cue("dana", "urgent", "That's Dana")],
+    [cue("q4", "status", "Tom said Q4"), entry("s1", "status", null, "09-28 08:00 SailPoint · approved")]);
+  const church = notebook("church", [entry("c1", "todo", "2026-09-27", "18:00 Pastor Dan · lead prayer?")]);
+  const rows = entryRows([work, church], ["church"], "ctx");
+  assert.deepEqual(rows.map((r) => r.text), ["‼ That's Dana", "◆ You owe Priya an RFC review", "○ Tom said Q4", "◆ Pastor Dan · lead prayer?"]);
+  const atWork = entryRows([work], ["work"], "ctx");
+  assert.deepEqual(atWork.map((r) => r.text).slice(3), ["‼ Ivana · refresh failed", "1 status message"], "the conversation's status cue isn't counted twice");
+  assert.equal(cueLine(cue("rfc", "todo", "You owe Priya an RFC review")), "You owe Priya an RFC review");
+});
+
+test("every entry offers Back first, then Dismiss and the categories it isn't", () => {
+  assert.deepEqual(entryOptions("urgent").map((o) => o.label), ["Back", "Urgent – Dismiss", "Not urgent – TODO", "Not urgent – Status"]);
+  assert.deepEqual(entryOptions("todo").map((o) => [o.action, o.to]), [["keep", undefined], ["dismiss", undefined], ["move", "urgent"], ["move", "status"]]);
+  assert.deepEqual(entryOptions("status").map((o) => o.label), ["Back", "Status – Dismiss", "Not status – TODO", "Not status – Urgent"]);
+  assert.deepEqual(entryOptions(null).map((o) => o.to ?? o.action), ["keep", "dismiss", "urgent", "todo", "status"]);
+});
+
+test("a notification's responses: buttons, canned and suggested replies, without repeats", () => {
+  const json = JSON.stringify([
+    { title: "Mark as read", action: 0, reply: null },
+    { title: "Reply", action: 1, reply: "On my way" },
+    { title: "Reply", action: 1, reply: "On my way" },
+    { title: "Reply", action: 1, reply: "  " },
+    { title: "", action: 2, reply: null },
+  ]);
+  assert.deepEqual(parseResponses("k", json), [
+    { key: "k", index: 0, reply: null, label: "Mark as read" },
+    { key: "k", index: 1, reply: "On my way", label: 'Reply: "On my way"' },
+  ]);
+  assert.deepEqual(parseResponses("k", "nope"), []);
 });
 
 test("acting locally moves the entry and keeps what Claude first said", () => {
@@ -120,4 +149,5 @@ test("acting locally moves the entry and keeps what Claude first said", () => {
   notebooks = applyLocally(notebooks, "work", "b", { label: "", action: "dismiss" });
   assert.equal(notebooks[0].statusCount, 1);
   assert.equal(applyLocally(notebooks, "work", "a", { label: "", action: "keep" }), notebooks);
+  assert.equal(applyLocally(notebooks, "work", "a", { label: "", action: "respond" }), notebooks);
 });

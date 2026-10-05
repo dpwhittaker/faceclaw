@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -18,8 +19,10 @@ import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 
@@ -83,6 +86,7 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
     @Override
     public void onNotificationRemoved(StatusBarNotification statusBarNotification) {
         FaceclawNotificationRecorder.record(this, statusBarNotification, "removed");
+        FaceclawNotificationFeed.removed(statusBarNotification.getKey());
         forgetActiveNotificationWakeKey(statusBarNotification);
         super.onNotificationRemoved(statusBarNotification);
     }
@@ -282,6 +286,24 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
             Log.w(TAG, "failed to invoke notification action", t);
             return false;
         }
+    }
+
+    /** Android's suggested replies for a notification (Android 10 and later), as the ranking has them now. */
+    static List<CharSequence> smartReplies(String key) {
+        FaceclawMediaNotificationListenerService service = activeService;
+        if (service == null || key == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return Collections.emptyList();
+        }
+        try {
+            RankingMap rankings = service.getCurrentRanking();
+            Ranking ranking = new Ranking();
+            if (rankings != null && rankings.getRanking(key, ranking) && ranking.getSmartReplies() != null) {
+                return ranking.getSmartReplies();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "failed to read suggested replies", t);
+        }
+        return Collections.emptyList();
     }
 
     public static boolean dismissNotification(String key) {

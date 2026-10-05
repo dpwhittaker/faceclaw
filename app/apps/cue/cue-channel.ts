@@ -36,9 +36,9 @@ export type CueSwitchFrame = {
   team?: string;
 };
 
-export type CueListItem = { id: string; rank: number; title: string; detail: string; label: string };
 export type CueRecentPerson = { personId: string; name: string; team: string; lastTalked: number };
-export type CuePopup = { id: string; title: string; lines: string[]; priority: string; seconds: number };
+/** A cue Claude filed during a conversation (an entry in the notebook, like a notification's); urgent ones pop up. */
+export type CueEntryFrame = { contextId: string; notebook: string; entryId: string; category: "urgent" | "todo" | "status"; line: string; title: string; detail: string };
 /** A notification the backend's triage filed. */
 export type CueTriage = { nid: string; category: "urgent" | "todo" | "status"; notebook: string; entryId: string; line: string; title: string; body: string; app: string };
 
@@ -69,8 +69,7 @@ export type CueNotificationFrame = {
 export type CueChannelEvents = {
   onStatus(status: CueChannelStatus, detail: string): void;
   onRecent(recent: CueRecentPerson[]): void;
-  onList(contextId: string, items: CueListItem[]): void;
-  onPopup(popup: CuePopup): void;
+  onCue(cue: CueEntryFrame): void;
   onEndContext(contextId: string, reason: string): void;
   onAnswer(askId: string, text: string, done: boolean): void;
   onTriage(triage: CueTriage): void;
@@ -273,16 +272,15 @@ export class CueChannel {
       case "session-ack":
         this.events.onRecent(Array.isArray(frame.recent) ? frame.recent : []);
         return;
-      case "list":
-        this.events.onList(String(frame.contextId), Array.isArray(frame.items) ? frame.items : []);
-        return;
-      case "popup":
-        this.events.onPopup({
-          id: String(frame.id),
+      case "cue":
+        this.events.onCue({
+          contextId: String(frame.contextId),
+          notebook: String(frame.notebook ?? ""),
+          entryId: String(frame.entryId ?? ""),
+          category: frame.category === "urgent" || frame.category === "todo" ? frame.category : "status",
+          line: String(frame.line ?? ""),
           title: String(frame.title ?? ""),
-          lines: Array.isArray(frame.lines) ? frame.lines.map(String) : [],
-          priority: String(frame.priority ?? "normal"),
-          seconds: Number(frame.seconds) || 12,
+          detail: String(frame.detail ?? ""),
         });
         return;
       case "end-context":

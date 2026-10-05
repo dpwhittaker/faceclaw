@@ -2,7 +2,7 @@ import { shouldShowNotificationOnGlasses } from "../../native/notification-sourc
 import { onAnySettingChanged } from "../../ui/dashboard-settings";
 import { postAmbientCard } from "../../ui/shell/ambient-cards";
 import { shell } from "../../ui/shell/shell";
-import { CueChannel, type CueChannelEvents, type CueChannelStatus, type CueMemoryUpdate, type CueRecentPerson, type CueTriage } from "./cue-channel";
+import { CueChannel, type CueChannelEvents, type CueChannelStatus, type CueEntryFrame, type CueMemoryUpdate, type CueRecentPerson, type CueTriage } from "./cue-channel";
 import { CueCalendarSync } from "./cue-calendar-sync";
 import { CueRecordings } from "./cue-recordings";
 import { cueBackendTokenSetting, cueBackendUrlSetting, cueOrgFor } from "./cue-settings";
@@ -11,7 +11,8 @@ import { androidCueTransport } from "./cue-transport";
 import { CueVoices } from "./cue-voices";
 import { EntryPopupLayer, type EntryPopup } from "./entry-layer";
 import { notificationId, routeNotification, type FeedNotification } from "./meeting-notifications";
-import { applyLocally, entryOptions, type EntryOption, type Notebook, type NotebookEntry } from "./notebook-view";
+import { BACK, applyLocally, cueLine, entryOptions, type EntryCategory, type EntryOption, type Notebook, type NotebookEntry } from "./notebook-view";
+import { parseResponses, type NotificationResponse } from "./notification-responses";
 
 declare const com: any;
 
@@ -19,18 +20,21 @@ declare const com: any;
  * Cue's always-on half, started when Faceclaw starts: the connection to
  * Cue's backend, and every notification. Meetings go onto the Work
  * calendar; everything else goes to the backend's triage, and the urgent
- * ones pop up over whatever app is in front. Faceclaw's own notification
- * pop-ups stay off while this runs; if triage hasn't answered within
- * TRIAGE_WAIT_MS (backend down), the message pops up plainly instead.
- * The Cue window's conversations use the same connection, and recordings
- * of finished conversations are handed off from here, Cue open or not.
+ * ones pop up over whatever app is in front, as do the urgent cues Claude
+ * gives during a conversation. A notification's pop-up also offers what
+ * the notification itself offers (Mark as read, suggested replies...).
+ * Faceclaw's own notification pop-ups stay off while this runs; if triage
+ * hasn't answered within TRIAGE_WAIT_MS (backend down), the message pops up
+ * plainly instead. The Cue window's conversations use the same connection,
+ * and recordings of finished conversations are handed off from here, Cue
+ * open or not.
  */
 
 const TRIAGE_WAIT_MS = 60_000;
 const SEEN_KEPT = 500;
 
 /** What the Cue window's conversation half listens for. */
-export type CueConversationHandler = Pick<CueChannelEvents, "onList" | "onPopup" | "onEndContext" | "onAnswer" | "onContextAck" | "onSpeaker">;
+export type CueConversationHandler = Pick<CueChannelEvents, "onEndContext" | "onAnswer" | "onContextAck" | "onSpeaker">;
 
 const MEMORY_CARD_SECONDS = 10;
 
@@ -50,6 +54,8 @@ class CueLink {
   // Notifications sent to triage, by id, until it answers (or the wait runs out).
   private readonly waiting = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly seen = new Set<string>();
+  // Android's key for each notification sent to triage, by id, for its responses.
+  private readonly keys = new Map<string, string>();
   private feedListener: any = null;
   private readonly calendar = new CueCalendarSync();
   private readonly termux = new CueTermuxSupervisor(() => this.status === "connected", (detail) => this.setDetail(detail));
@@ -117,9 +123,14 @@ class CueLink {
     return () => this.listeners.delete(listener);
   }
 
-  /** Dismisses or moves an entry; the glasses update at once and the backend confirms. */
-  act(notebook: string, entry: NotebookEntry, option: EntryOption): void {
-    if (option.action === "keep") return;
+  /**
+   * Dismisses or moves an entry (the glasses update at once and the backend
+   * confirms), or sends one of its notification's responses and says how
+   * that went.
+   */
+  act(notebook: string, entry: NotebookEntry, option: EntryOption): string | void {
+    if (option.action === "respond" && option.response) return respond(option.response);
+    if (option.action !== "dismiss" && option.action !== "move") return;
     this.books = applyLocally(this.books, notebook, entry.id, option);
     this.channel.entry(notebook, entry.id, option.action, option.to);
     this.notify();
@@ -132,10 +143,17 @@ class CueLink {
     this.notify();
   }
 
-  /** The pop-up for an entry, with its category's options. */
-  entryPopup(notebook: Notebook, entry: NotebookEntry): EntryPopup {
+  /** The pop-up for an entry: Back, its category's options, its notification's responses, then any extra options. */
+  entryPopup(notebook: Notebook, entry: NotebookEntry, extra: EntryOption[] = []): EntryPopup {
     const heading = entry.title ? `${entry.title} · ${notebook.label}` : notebook.label;
-    return { category: entry.category, heading, body: entry.body || entry.text, options: entryOptions(entry.category) };
+    const body = entry.contextId ? [cueLine(entry), entry.body].filter(Boolean).join("\n") : entry.body || entry.text;
+    return { category: entry.category, heading, body, options: [...entryOptions(entry.category), ...this.responses(entry.nid), ...extra] };
+  }
+
+  /** What a notification offers to send back, as options. */
+  private responses(nid: string | null): EntryOption[] {
+    const key = nid ? this.keys.get(nid) : undefined;
+    return (key ? readResponses(key) : []).map((response) => ({ label: response.label, action: "respond", response }));
   }
 
   private connect(): void {
@@ -162,6 +180,8 @@ class CueLink {
     }
     if (route.kind === "ignore" || !shouldShowNotificationOnGlasses(notification.package)) return;
     const nid = notificationId(notification);
+    this.keys.set(nid, notification.key);
+    if (this.keys.size > SEEN_KEPT) this.keys.delete(this.keys.keys().next().value as string);
     if (this.seen.has(nid)) return;
     this.seen.add(nid);
     if (this.seen.size > SEEN_KEPT) this.seen.delete(this.seen.values().next().value as string);
@@ -185,7 +205,8 @@ class CueLink {
       const body = notification.messages.length
         ? notification.messages.map((message) => `${message.sender ? `${message.sender}: ` : ""}${message.text}`).join("\n")
         : notification.bigText || notification.text;
-      this.popUp({ category: null, heading: `${notification.title} · ${notification.app}`, body, options: [{ label: "OK", action: "keep" }] }, () => {});
+      this.popUp({ category: null, heading: `${notification.title} · ${notification.app}`, body, options: [BACK, ...this.responses(nid)] }, (option) =>
+        (option.response ? respond(option.response) : undefined));
     }, TRIAGE_WAIT_MS));
   }
 
@@ -195,15 +216,27 @@ class CueLink {
     this.waiting.delete(triage.nid);
     if (triage.category !== "urgent") return;
     const heading = [triage.title, triage.app].filter(Boolean).join(" · ") || triage.line;
-    this.popUp({ category: "urgent", heading, body: triage.body || triage.line, options: entryOptions("urgent") }, (option) => {
-      const entry = this.books.find((book) => book.name === triage.notebook)?.entries.find((candidate) => candidate.id === triage.entryId)
-        ?? { id: triage.entryId, section: "day", day: null, category: "urgent", firstCategory: "urgent", text: triage.line, nid: triage.nid, title: triage.title, body: triage.body } as NotebookEntry;
-      this.act(triage.notebook, entry, option);
+    this.popUpEntry(triage.notebook, { id: triage.entryId, category: "urgent", text: triage.line, nid: triage.nid, title: triage.title, body: triage.body, contextId: null }, heading, triage.body || triage.line);
+  }
+
+  /** A cue from the conversation: an urgent one pops up like an urgent message. */
+  private onCue(cue: CueEntryFrame): void {
+    if (cue.category !== "urgent") return;
+    this.popUpEntry(cue.notebook, { id: cue.entryId, category: "urgent", text: cue.line, nid: null, title: cue.title, body: cue.detail, contextId: cue.contextId }, cue.line, cue.detail || cue.title);
+  }
+
+  /** An entry that just arrived, over whatever app is in front; acted on as the notebooks have it by then. */
+  private popUpEntry(notebook: string, arrived: Pick<NotebookEntry, "id" | "category" | "text" | "nid" | "title" | "body" | "contextId">, heading: string, body: string): void {
+    const category = arrived.category as EntryCategory;
+    this.popUp({ category, heading, body, options: [...entryOptions(category), ...this.responses(arrived.nid)] }, (option) => {
+      const entry = this.books.find((book) => book.name === notebook)?.entries.find((candidate) => candidate.id === arrived.id)
+        ?? { ...arrived, section: "day", day: null, firstCategory: category };
+      return this.act(notebook, entry, option);
     });
   }
 
   /** A pop-up over whatever app is in front. */
-  private popUp(popup: EntryPopup, choose: (option: EntryOption) => void): void {
+  private popUp(popup: EntryPopup, choose: (option: EntryOption) => string | void): void {
     let close = () => {};
     close = shell.openModal(new EntryPopupLayer(popup, choose, () => close()));
   }
@@ -219,8 +252,7 @@ class CueLink {
         this.recentPeople = recent;
         this.notify();
       },
-      onList: (contextId, items) => this.conversation?.onList(contextId, items),
-      onPopup: (popup) => this.conversation?.onPopup(popup),
+      onCue: (cue) => this.onCue(cue),
       onEndContext: (contextId, reason) => this.conversation?.onEndContext(contextId, reason),
       onAnswer: (askId, text, done) => this.conversation?.onAnswer(askId, text, done),
       onTriage: (triage) => this.onTriage(triage),
@@ -259,6 +291,26 @@ class CueLink {
 function notebookLabel(path: string): string {
   const parts = path.split("/");
   return parts[parts.length - 2] ?? path;
+}
+
+function readResponses(key: string): NotificationResponse[] {
+  if (!global.isAndroid) return [];
+  try {
+    return parseResponses(key, String(com.faceclaw.app.FaceclawNotificationFeed.responses(key)));
+  } catch (error) {
+    console.warn(`[Cue] couldn't read a notification's responses: ${String(error)}`);
+    return [];
+  }
+}
+
+/** Sends a notification's response; says how it went, for the pop-up. */
+function respond(response: NotificationResponse): string {
+  try {
+    if (com.faceclaw.app.FaceclawNotificationFeed.respond(response.key, response.index, response.reply)) return `Sent: ${response.label}`;
+  } catch (error) {
+    console.warn(`[Cue] couldn't send a notification response: ${String(error)}`);
+  }
+  return "Couldn't send it: the notification is gone.";
 }
 
 function newId(): string {

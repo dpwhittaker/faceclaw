@@ -53,6 +53,7 @@
     "../app/apps/cue/meeting-notifications.ts",
     "../app/apps/cue/meeting-sync.ts",
     "../app/apps/cue/notebook-view.ts",
+    "../app/apps/cue/notification-responses.ts",
     "../app/apps/cue/voiceprints.ts",
     "../app/apps/cue/voice-pool.ts",
     "../app/apps/cue/after-conversation.ts"

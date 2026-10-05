@@ -1,7 +1,10 @@
 package com.faceclaw.app;
 
 import android.app.Notification;
+import android.app.PendingIntent;
+import android.app.RemoteInput;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -15,6 +18,8 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArraySet;
 
 /**
@@ -25,6 +30,10 @@ import java.util.concurrent.CopyOnWriteArraySet;
  * later. Ongoing notifications and group summaries are left out. While no
  * listener is registered (the app's UI hasn't started yet), the latest
  * BUFFERED notifications wait and go to the first listener.
+ *
+ * Each notification's actions are kept until it's removed, so the glasses
+ * can answer it later (responses, respond): Cue offers them on the
+ * notification's pop-up.
  */
 public final class FaceclawNotificationFeed {
     private static final String TAG = "FaceclawNotifyFeed";
@@ -38,6 +47,15 @@ public final class FaceclawNotificationFeed {
     private static final Handler mainHandler = new Handler(Looper.getMainLooper());
     private static final CopyOnWriteArraySet<Listener> listeners = new CopyOnWriteArraySet<>();
     private static final ArrayDeque<String> pending = new ArrayDeque<>();
+    private static final int HELD = 300;
+    // The latest notifications' actions by key, least recently posted dropped first.
+    private static final LinkedHashMap<String, Notification.Action[]> held = new LinkedHashMap<String, Notification.Action[]>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Notification.Action[]> eldest) {
+            return size() > HELD;
+        }
+    };
+    private static Context appContext;
 
     private FaceclawNotificationFeed() {
     }
@@ -70,6 +88,13 @@ public final class FaceclawNotificationFeed {
         if ((notification.flags & skip) != 0) {
             return;
         }
+        appContext = context.getApplicationContext();
+        synchronized (held) {
+            held.remove(statusBarNotification.getKey());
+            if (notification.actions != null && notification.actions.length > 0) {
+                held.put(statusBarNotification.getKey(), notification.actions);
+            }
+        }
         String json;
         try {
             json = toJson(context, statusBarNotification).toString();
@@ -88,6 +113,115 @@ public final class FaceclawNotificationFeed {
         }
         for (Listener listener : listeners) {
             deliver(listener, json);
+        }
+    }
+
+    /** The notification is gone: so are its responses. */
+    static void removed(String key) {
+        synchronized (held) {
+            held.remove(key);
+        }
+    }
+
+    /**
+     * What the glasses can send back for a notification, as a JSON array of
+     * {title, action, reply}: its buttons that act without opening an app
+     * (reply null), the canned answers of its reply fields, and Android's
+     * suggested replies through its first free-form reply field. Empty once
+     * the notification is gone.
+     */
+    public static String responses(String key) {
+        Notification.Action[] actions;
+        synchronized (held) {
+            actions = held.get(key);
+        }
+        JSONArray out = new JSONArray();
+        if (actions == null) {
+            return out.toString();
+        }
+        boolean suggested = false;
+        try {
+            for (int index = 0; index < actions.length; index++) {
+                Notification.Action action = actions[index];
+                if (action == null || action.actionIntent == null || action.title == null) {
+                    continue;
+                }
+                String title = action.title.toString().trim();
+                RemoteInput[] inputs = action.getRemoteInputs();
+                if (inputs != null && inputs.length > 0) {
+                    CharSequence[] choices = inputs[0].getChoices();
+                    if (choices != null) {
+                        for (CharSequence choice : choices) {
+                            putResponse(out, title, index, choice);
+                        }
+                    }
+                    if (inputs[0].getAllowFreeFormInput() && !suggested) {
+                        suggested = true;
+                        for (CharSequence reply : FaceclawMediaNotificationListenerService.smartReplies(key)) {
+                            putResponse(out, title, index, reply);
+                        }
+                    }
+                    continue;
+                }
+                // One that opens an app can't be done from the glasses.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && action.actionIntent.isActivity()) {
+                    continue;
+                }
+                putResponse(out, title, index, null);
+            }
+        } catch (JSONException e) {
+            Log.w(TAG, "failed to list notification responses", e);
+        }
+        return out.toString();
+    }
+
+    private static void putResponse(JSONArray out, String title, int index, CharSequence reply) throws JSONException {
+        JSONObject response = new JSONObject();
+        response.put("title", title);
+        response.put("action", index);
+        response.put("reply", reply == null ? JSONObject.NULL : reply.toString());
+        out.put(response);
+    }
+
+    /**
+     * Sends one of a notification's responses: its action, with the reply
+     * text in the action's first reply field when there is one. False when
+     * the notification is gone or its app canceled the action.
+     */
+    public static boolean respond(String key, int index, String reply) {
+        Notification.Action[] actions;
+        synchronized (held) {
+            actions = held.get(key);
+        }
+        Context context = appContext;
+        if (actions == null || context == null || index < 0 || index >= actions.length || actions[index] == null || actions[index].actionIntent == null) {
+            return false;
+        }
+        Notification.Action action = actions[index];
+        try {
+            if (reply == null || reply.isEmpty()) {
+                action.actionIntent.send();
+                return true;
+            }
+            RemoteInput[] inputs = action.getRemoteInputs();
+            if (inputs == null || inputs.length == 0) {
+                return false;
+            }
+            Intent fillIn = new Intent();
+            Bundle results = new Bundle();
+            results.putCharSequence(inputs[0].getResultKey(), reply);
+            RemoteInput.addResultsToIntent(new RemoteInput[] { inputs[0] }, fillIn, results);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                RemoteInput.setResultsSource(fillIn, RemoteInput.SOURCE_CHOICE);
+            }
+            action.actionIntent.send(context, 0, fillIn);
+            return true;
+        } catch (PendingIntent.CanceledException e) {
+            Log.w(TAG, "notification response was canceled", e);
+            return false;
+        } catch (Throwable t) {
+            Log.w(TAG, "failed to send notification response", t);
+            return false;
         }
     }
 
