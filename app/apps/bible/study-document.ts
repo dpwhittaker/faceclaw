@@ -1,10 +1,14 @@
 /**
- * A scrolling page of study text for the ring: blocks of styled runs, some of
- * them focus stops (a whole block, like a cross-reference, or a run inside a
- * block, like a reference cited in a note). Swipes move the focus from stop to
- * stop like a browser's tab key, but never scroll more than a page at a time,
- * so a long note between two stops is read on the way rather than jumped
- * over; tap follows the focused stop.
+ * A scrolling page of study text for the ring, navigated at two levels.
+ * Every block (a paragraph, a note, a line of a lexicon's outline, a
+ * cross-reference, a word, a section heading) is a stop, outlined like a
+ * verse in the reading view; swipes move from block to block. Tapping a
+ * block runs its action (open the reference, the word, fold the section);
+ * a block of prose follows its one reference, or, when it cites several,
+ * steps inside it: then swipes move from reference to reference within it,
+ * tap follows one, and leaving (double-tap) returns to the blocks. Neither
+ * level ever scrolls more than a page at a time, so a block taller than the
+ * screen is read on the way rather than jumped over.
  *
  * Takes its fonts as arguments, so tests can load it under plain node.
  */
@@ -24,7 +28,7 @@ export type StudyRun = {
   readonly tone?: Tone;
   /** "small" to set a run (a note marker) in the small font inside a medium block. */
   readonly size?: "small" | "medium";
-  /** Makes this run a stop of its own. */
+  /** Makes this run a link inside its block. */
   readonly action?: StudyAction;
 };
 
@@ -37,17 +41,22 @@ export type StudyBlock = {
   readonly hangingIndent?: number;
   /** Extra space above the block. */
   readonly spaceBefore?: number;
-  /** Makes the whole block one stop. */
+  /** What tapping the block does (otherwise it follows, or steps into, its links). */
   readonly action?: StudyAction;
+  /** Identifies the block across rebuilds when it has no action. */
+  readonly key?: string;
   /** A faint rule above the block (section breaks). */
   readonly rule?: boolean;
 };
 
 export type StudyFonts = { small: UiFont; medium: UiFont };
 
-type Fragment = { x: number; y: number; text: string; font: UiFont; value: number; underline: boolean };
+type Fragment = { x: number; y: number; text: string; font: UiFont; value: number; underline: boolean; run?: StudyRun };
 type Rect = { x: number; y: number; width: number; height: number };
-type Stop = { action: StudyAction; top: number; bottom: number; rects: Rect[]; block: boolean };
+/** Something a swipe can land on: its vertical extent. */
+type Span = { top: number; bottom: number };
+type LinkStop = Span & { action: StudyAction; rects: Rect[] };
+type BlockStop = Span & { key: string; action?: StudyAction; links: LinkStop[] };
 type Line = { top: number; bottom: number; fragments: Fragment[] };
 
 /** Gap between lines of a block, and the default gap between blocks. */
@@ -57,12 +66,15 @@ const BLOCK_GAP = 6;
 export class StudyDocument {
   private blocks: readonly StudyBlock[] = [];
   private lines: Line[] = [];
-  private stops: Stop[] = [];
+  private stops: BlockStop[] = [];
   private contentHeight = 0;
   private layoutKey = "";
   private scroll = 0;
-  private focus = -1;
-  private focusKey: string | null = null;
+  /** The focused block, and the focused link inside it while stepped in (-1 otherwise). */
+  private focus = 0;
+  private link = -1;
+  private restoreKey: string | null = null;
+  private restoreIndex = 0;
   private viewHeight = 1;
 
   setBlocks(blocks: readonly StudyBlock[]): void {
@@ -70,23 +82,42 @@ export class StudyDocument {
     this.layoutKey = "";
   }
 
-  /** The key of the focused stop, if any (to restore after a rebuild). */
+  /** The key of the focused block (to restore after a rebuild). */
   focusedKey(): string | null {
-    return this.focus >= 0 ? (this.stops[this.focus]?.action.key ?? null) : this.focusKey;
+    return this.stops[this.focus]?.key ?? this.restoreKey;
   }
 
-  /** Focus the stop with this key once laid out (after setBlocks). */
-  focusOn(key: string | null): void {
-    this.focusKey = key;
-    this.focus = -1;
+  /** After setBlocks: focus the block with this key once laid out, or failing that the block at `index`. */
+  focusOn(key: string | null, index = this.focus): void {
+    this.restoreKey = key;
+    this.restoreIndex = index;
+    this.link = -1;
+  }
+
+  focusedIndex(): number {
+    return this.focus;
   }
 
   scrollTop(): number {
     return this.scroll;
   }
 
-  setScrollTop(scroll: number): void {
-    this.scroll = scroll;
+  /** Whether swipes are stepping through one block's links. */
+  inLinks(): boolean {
+    return this.link >= 0;
+  }
+
+  /** Back from a block's links to the blocks. */
+  leaveLinks(): void {
+    this.link = -1;
+  }
+
+  /** What tapping now would do: follow a link or a block's action, step into links, or nothing. */
+  tapMeaning(): "follow" | "links" | "none" {
+    const stop = this.stops[this.focus];
+    if (!stop) return "none";
+    if (this.link >= 0 || stop.action || stop.links.length === 1) return "follow";
+    return stop.links.length > 1 ? "links" : "none";
   }
 
   /** Lay out for this width and view height (cheap when nothing changed). */
@@ -95,34 +126,40 @@ export class StudyDocument {
     const key = `${fonts.small.fingerprintId}:${fonts.medium.fingerprintId}:${width}`;
     if (key === this.layoutKey) return;
     this.layoutKey = key;
-    const previousKey = this.focusedKey();
+    const restoreKey = this.restoreKey ?? this.stops[this.focus]?.key ?? null;
+    const restoreIndex = this.restoreKey !== null ? this.restoreIndex : this.focus;
+    const restoreLink = this.restoreKey === null ? this.link : -1;
     this.lines = [];
     this.stops = [];
-    const stopByKey = new Map<string, Stop>();
     let y = 0;
     this.blocks.forEach((block, blockIndex) => {
       if (blockIndex > 0) y += block.spaceBefore ?? BLOCK_GAP;
-      const blockTop = y;
+      const top = y;
       if (block.rule) {
         this.lines.push({ top: y, bottom: y + 1, fragments: [{ x: 0, y, text: "", font: fonts.small, value: 0, underline: false }] });
         y += 6;
       }
-      y = this.layoutBlock(block, fonts, width, y, stopByKey);
-      if (block.action) {
-        this.stops.push({ action: block.action, top: blockTop, bottom: y, rects: [], block: true });
-      }
+      const links = new Map<string, LinkStop>();
+      y = this.layoutBlock(block, fonts, width, y, links);
+      this.stops.push({
+        key: block.action?.key ?? block.key ?? `block:${blockIndex}`,
+        action: block.action,
+        top,
+        bottom: y,
+        links: [...links.values()],
+      });
     });
     this.contentHeight = y;
-    // Inline stops were collected in reading order; merge with block stops by position.
-    for (const stop of stopByKey.values()) this.stops.push(stop);
-    this.stops.sort((a, b) => a.top - b.top || a.bottom - b.bottom);
-    this.focus = previousKey ? this.stops.findIndex((stop) => stop.action.key === previousKey) : -1;
-    this.focusKey = null;
+    const found = restoreKey ? this.stops.findIndex((stop) => stop.key === restoreKey) : -1;
+    this.focus = Math.max(0, Math.min(this.stops.length - 1, found >= 0 ? found : restoreIndex));
+    this.link = found >= 0 || this.restoreKey === null ? Math.min(restoreLink, (this.stops[this.focus]?.links.length ?? 0) - 1) : -1;
+    this.restoreKey = null;
     this.scroll = this.clampScroll(this.scroll);
-    if (this.focus >= 0) this.scroll = this.scrollToShow(this.stops[this.focus]!);
+    const focused = this.focusedSpan();
+    if (focused) this.scroll = this.scrollToShow(focused);
   }
 
-  private layoutBlock(block: StudyBlock, fonts: StudyFonts, width: number, top: number, stops: Map<string, Stop>): number {
+  private layoutBlock(block: StudyBlock, fonts: StudyFonts, width: number, top: number, links: Map<string, LinkStop>): number {
     const blockFont = block.size === "medium" ? fonts.medium : fonts.small;
     const indent = block.indent ?? 0;
     const lineHeight = blockFont.lineHeight;
@@ -159,12 +196,12 @@ export class StudyDocument {
         while (tokenWidth > width - x && text.length > 1) {
           let cut = text.length - 1;
           while (cut > 1 && font.measureText(text.slice(0, cut)) > width - x) cut--;
-          this.place(line, run, font, value, x, dy, text.slice(0, cut), stops);
+          this.place(line, run, font, value, x, dy, text.slice(0, cut), links);
           text = text.slice(cut);
           tokenWidth = font.measureText(text);
           newLine();
         }
-        this.place(line, run, font, value, x, dy, text, stops);
+        this.place(line, run, font, value, x, dy, text, links);
         x += tokenWidth;
         lineStart = false;
       }
@@ -174,25 +211,23 @@ export class StudyDocument {
     return line.bottom;
   }
 
-  private place(line: Line, run: StudyRun, font: UiFont, value: number, x: number, dy: number, text: string, stops: Map<string, Stop>): void {
+  private place(line: Line, run: StudyRun, font: UiFont, value: number, x: number, dy: number, text: string, links: Map<string, LinkStop>): void {
     const y = line.top + dy;
     const previous = line.fragments[line.fragments.length - 1];
     const underline = run.action !== undefined;
     // Words of one run on one line draw as one fragment (spaces included).
-    if (previous && previous.font === font && previous.value === value && previous.underline === underline &&
-        previous.y === y && (previous as Fragment & { run?: StudyRun }).run === run) {
+    if (previous && previous.run === run && previous.y === y) {
       const gap = x - (previous.x + font.measureText(previous.text));
       const spaces = Math.max(0, Math.round(gap / Math.max(1, font.measureText(" "))));
       previous.text += " ".repeat(spaces) + text;
     } else {
-      const fragment: Fragment & { run?: StudyRun } = { x, y, text, font, value, underline, run };
-      line.fragments.push(fragment);
+      line.fragments.push({ x, y, text, font, value, underline, run });
     }
     if (run.action) {
-      let stop = stops.get(run.action.key);
+      let stop = links.get(run.action.key);
       if (!stop) {
-        stop = { action: run.action, top: line.top, bottom: line.bottom, rects: [], block: false };
-        stops.set(run.action.key, stop);
+        stop = { action: run.action, top: line.top, bottom: line.bottom, rects: [] };
+        links.set(run.action.key, stop);
       }
       stop.bottom = Math.max(stop.bottom, line.bottom);
       const width = font.measureText(text);
@@ -205,73 +240,84 @@ export class StudyDocument {
     }
   }
 
-  /** Swipe down: the next stop if it is no more than a page away, else a page further down. */
+  /** Swipe down: the next block (or link, stepped in), if it is no more than a page away; else a page further. */
   moveDown(): void {
-    const viewTop = this.scroll;
-    const start = this.focus >= 0 && this.stops[this.focus]!.bottom > viewTop ? this.focus + 1 : this.firstStopAtOrBelow(viewTop);
-    const next = this.stops[start];
-    const page = this.pageStep();
-    if (next) {
-      const target = Math.max(this.scroll, this.scrollToShow(next));
-      if (target - this.scroll <= page) {
-        this.focus = start;
-        this.scroll = target;
-        return;
-      }
-    }
-    this.scroll = this.clampScroll(this.snapDown(this.scroll + page));
+    this.move(1);
   }
 
-  /** Swipe up: the previous stop if it is no more than a page away, else a page further up. */
+  /** Swipe up: the previous block (or link), if it is no more than a page away; else a page back. */
   moveUp(): void {
-    const viewBottom = this.scroll + this.viewHeight;
-    const start = this.focus >= 0 && this.stops[this.focus]!.top < viewBottom ? this.focus - 1 : this.lastStopAtOrAbove(viewBottom);
-    const previous = start >= 0 ? this.stops[start] : undefined;
+    this.move(-1);
+  }
+
+  private move(direction: 1 | -1): void {
+    const inside = this.link >= 0;
+    const targets: Span[] = inside ? this.stops[this.focus]!.links : this.stops;
+    const current = inside ? this.link : this.focus;
     const page = this.pageStep();
-    if (previous) {
-      const target = Math.min(this.scroll, this.scrollToShow(previous));
-      if (this.scroll - target <= page) {
-        this.focus = start;
+    const next = targets[current + direction];
+    const here = targets[current];
+    // A block taller than the screen scrolls through before the focus leaves it.
+    const pending = here && !inside && (direction > 0
+      ? here.bottom > this.scroll + this.viewHeight
+      : here.top < this.scroll);
+    if (next && !pending) {
+      const target = this.scrollToShow(next);
+      if (Math.abs(target - this.scroll) <= page) {
+        if (inside) this.link = current + direction;
+        else this.focus = current + direction;
         this.scroll = target;
         return;
       }
     }
-    if (this.scroll <= 0) {
-      this.focus = -1;
-      return;
-    }
-    this.scroll = this.clampScroll(this.snapUp(this.scroll - page));
+    if (!next && !pending) return;
+    this.scroll = this.clampScroll(direction > 0 ? this.snapDown(this.scroll + page) : this.snapUp(this.scroll - page));
   }
 
-  /** Tap: follow the focused stop while it is on screen. False when nothing was followed. */
+  /** Tap: run the block's action, follow its only link, step into its links, or follow the focused link. */
   activate(ctx: LayerContext): boolean {
-    const stop = this.focus >= 0 ? this.stops[this.focus] : undefined;
-    if (!stop || stop.bottom <= this.scroll || stop.top >= this.scroll + this.viewHeight) return false;
-    stop.action.run(ctx);
-    return true;
+    const stop = this.stops[this.focus];
+    if (!stop) return false;
+    if (this.link >= 0) {
+      stop.links[this.link]?.action.run(ctx);
+      return true;
+    }
+    if (stop.action) {
+      stop.action.run(ctx);
+      return true;
+    }
+    if (stop.links.length === 1) {
+      stop.links[0]!.action.run(ctx);
+      return true;
+    }
+    if (stop.links.length > 1) {
+      // Step in at the first link on screen.
+      const visible = stop.links.findIndex((link) => link.top >= this.scroll && link.bottom <= this.scroll + this.viewHeight);
+      this.link = Math.max(0, visible);
+      this.scroll = this.scrollToShow(stop.links[this.link]!);
+      return true;
+    }
+    return false;
   }
 
   hasFocus(): boolean {
-    return this.focus >= 0;
+    return this.stops.length > 0;
   }
 
   /** Draw the visible lines into (x, y, width, viewHeight); lines cut by the edges are left out. */
   paint(image: GrayImage, x: number, y: number, width: number): void {
     const top = this.scroll;
     const bottom = top + this.viewHeight;
-    const focused = this.focus >= 0 ? this.stops[this.focus] : undefined;
-    if (focused) {
-      if (focused.block) {
-        const boxTop = Math.max(focused.top, top) - 3;
-        const boxBottom = Math.min(focused.bottom, bottom) + 3;
-        image.fillRoundedRect(x - 6, y + boxTop - top, width + 12, boxBottom - boxTop, 18, 6);
-        image.drawRoundedRect(x - 6, y + boxTop - top, width + 12, boxBottom - boxTop, 70, 6);
-      } else {
-        for (const rect of focused.rects) {
-          if (rect.y < top || rect.y + rect.height > bottom) continue;
-          image.fillRoundedRect(x + rect.x - 3, y + rect.y - top - 1, rect.width + 6, rect.height + 2, 30, 4);
-          image.drawRoundedRect(x + rect.x - 3, y + rect.y - top - 1, rect.width + 6, rect.height + 2, 90, 4);
-        }
+    const block = this.stops[this.focus];
+    if (block) {
+      const boxTop = Math.max(block.top, top - 2) - 3;
+      const boxBottom = Math.min(block.bottom, bottom + 2) + 3;
+      image.drawRoundedRect(x - 6, y + boxTop - top, width + 12, boxBottom - boxTop, this.link >= 0 ? 70 : 170, 6);
+      const link = this.link >= 0 ? block.links[this.link] : undefined;
+      for (const rect of link?.rects ?? []) {
+        if (rect.y < top || rect.y + rect.height > bottom) continue;
+        image.fillRoundedRect(x + rect.x - 3, y + rect.y - top - 1, rect.width + 6, rect.height + 2, 30, 4);
+        image.drawRoundedRect(x + rect.x - 3, y + rect.y - top - 1, rect.width + 6, rect.height + 2, 170, 4);
       }
     }
     for (const line of this.lines) {
@@ -300,35 +346,28 @@ export class StudyDocument {
     };
   }
 
+  private focusedSpan(): Span | undefined {
+    const block = this.stops[this.focus];
+    return this.link >= 0 ? block?.links[this.link] : block;
+  }
+
   private pageStep(): number {
     // Keep a line or two of what was on screen.
     return Math.max(20, this.viewHeight - 40);
   }
 
-  /** The scroll that shows a stop whole (its top, if it is taller than the view). */
-  private scrollToShow(stop: Stop): number {
+  /** The scroll that shows a span whole (its top, if it is taller than the view). */
+  private scrollToShow(span: Span): number {
     let target = this.scroll;
-    if (stop.bottom > target + this.viewHeight) target = stop.bottom - this.viewHeight;
-    if (stop.top < target) target = stop.top;
-    return this.clampScroll(this.snapForTop(target, stop.top));
+    if (span.bottom > target + this.viewHeight) target = span.bottom - this.viewHeight;
+    if (span.top < target) target = span.top;
+    return this.clampScroll(this.snapForTop(target, span.top));
   }
 
-  /** Snap to a line top so no line is cut, but never past the stop's own top. */
-  private snapForTop(target: number, stopTop: number): number {
+  /** Snap to a line top so no line is cut, but never past the span's own top. */
+  private snapForTop(target: number, spanTop: number): number {
     const snapped = this.snapUp(target);
-    return snapped > stopTop ? this.snapDown(stopTop) : snapped;
-  }
-
-  private firstStopAtOrBelow(y: number): number {
-    const index = this.stops.findIndex((stop) => stop.top >= y);
-    return index < 0 ? this.stops.length : index;
-  }
-
-  private lastStopAtOrAbove(y: number): number {
-    for (let index = this.stops.length - 1; index >= 0; index--) {
-      if (this.stops[index]!.bottom <= y) return index;
-    }
-    return -1;
+    return snapped > spanTop ? this.snapDown(spanTop) : snapped;
   }
 
   private snapDown(y: number): number {
@@ -349,6 +388,7 @@ export class StudyDocument {
 
   private clampScroll(scroll: number): number {
     const max = Math.max(0, this.contentHeight - this.viewHeight);
-    return Math.max(0, Math.min(this.snapUp(max) >= max ? this.snapUp(max) : max, scroll));
+    const limit = this.snapUp(max) >= max ? this.snapUp(max) : max;
+    return Math.max(0, Math.min(limit, scroll));
   }
 }

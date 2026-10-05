@@ -128,61 +128,74 @@ test('the swipe filter passes temple swipes and other gestures untouched', () =>
   assert.equal(filter.accept(at('scroll-up', 1500)), true);
 });
 
-/** A document of `count` linked lines with `gap` plain lines between them. */
-function document(count, gap) {
+function pageOf(blocks) {
   const doc = new StudyDocument();
-  const runs = [];
-  const blocks = [];
-  const opened = [];
-  for (let i = 0; i < count; i++) {
-    blocks.push({ runs: [{ text: `link ${i}` }], action: { key: `l${i}`, run: () => opened.push(i) } });
-    for (let j = 0; j < gap; j++) blocks.push({ runs: [{ text: `filler ${i}.${j}` }] });
-  }
   doc.setBlocks(blocks);
   doc.layout({ small, medium }, 400, 200);
-  return { doc, opened, runs };
+  return doc;
 }
 
-test('swipes move between nearby links, but scroll a page at a time through long text between them', () => {
-  const { doc, opened } = document(3, 40);
+test('swipes move block by block; tapping a block cites several references steps into them', () => {
+  const opened = [];
+  const link = (key) => ({ text: key, action: { key, run: () => opened.push(key) } });
+  const tall = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n');
+  const doc = pageOf([
+    { runs: [{ text: 'heading' }] },
+    { runs: [{ text: 'see ' }, link('a'), { text: ', ' }, link('b'), { text: ' and ' }, link('c')] },
+    { runs: [{ text: 'a cross-reference' }], action: { key: 'x', run: () => opened.push('x') } },
+    { runs: [{ text: tall }] },
+    { runs: [{ text: 'after' }], key: 'after' },
+  ]);
   const ctx = {};
+  assert.equal(doc.focusedIndex(), 0);
+  assert.equal(doc.tapMeaning(), 'none');
   doc.moveDown();
-  assert.equal(doc.focusedKey(), 'l0');
+  assert.equal(doc.tapMeaning(), 'links');
   doc.activate(ctx);
-  assert.deepEqual(plainOf(opened), [0]);
-  // The next link is 40 lines away: swipes scroll toward it a page (200px view) at most at a time.
+  assert.ok(doc.inLinks());
+  doc.moveDown();
+  doc.activate(ctx);
+  assert.deepEqual(plainOf(opened), ['b']);
+  doc.leaveLinks();
+  doc.moveDown();
+  doc.activate(ctx);
+  assert.deepEqual(plainOf(opened), ['b', 'x']);
+  // The tall block: the focus lands on it, then swipes scroll through it a page at a time.
+  doc.moveDown();
+  assert.equal(doc.focusedIndex(), 3);
   let swipes = 0;
-  while (doc.focusedKey() === 'l0' && swipes < 20) {
+  while (doc.focusedIndex() === 3 && swipes < 20) {
     const before = doc.scrollTop();
     doc.moveDown();
     assert.ok(doc.scrollTop() - before <= 200, `scrolled ${doc.scrollTop() - before}px in one swipe`);
     swipes++;
   }
-  assert.equal(doc.focusedKey(), 'l1');
+  assert.equal(doc.focusedKey(), 'after');
   assert.ok(swipes > 2);
-  doc.activate(ctx);
-  assert.deepEqual(plainOf(opened), [0, 1]);
-  // And back up the same way.
+  // And back up through it the same way.
   swipes = 0;
-  while (doc.focusedKey() === 'l1' && swipes < 20) {
+  while (doc.focusedIndex() !== 2 && swipes < 20) {
     doc.moveUp();
     swipes++;
   }
-  assert.equal(doc.focusedKey(), 'l0');
-  doc.activate(ctx);
-  assert.deepEqual(plainOf(opened), [0, 1, 0]);
+  assert.equal(doc.focusedIndex(), 2);
+  assert.ok(swipes > 2);
 });
 
-test('the focus survives a rebuild of the page', () => {
-  const { doc } = document(4, 1);
+test('the focus survives a rebuild of the page, or keeps its place when its block is gone', () => {
+  const row = (key) => ({ runs: [{ text: key }], action: { key, run() {} } });
+  const doc = pageOf([row('a'), row('b'), row('more')]);
   doc.moveDown();
-  doc.moveDown();
-  const key = doc.focusedKey();
-  assert.equal(key, 'l1');
-  doc.setBlocks([{ runs: [{ text: 'new heading' }] }, ...Array.from({ length: 4 }, (_, i) => ({
-    runs: [{ text: `link ${i}` }], action: { key: `l${i}`, run() {} },
-  }))]);
-  doc.focusOn(key);
+  assert.equal(doc.focusedKey(), 'b');
+  doc.setBlocks([{ runs: [{ text: 'new heading' }] }, row('a'), row('b'), row('more')]);
+  doc.focusOn(doc.focusedKey(), doc.focusedIndex());
   doc.layout({ small, medium }, 400, 200);
-  assert.equal(doc.focusedKey(), 'l1');
+  assert.equal(doc.focusedKey(), 'b');
+  doc.moveDown();
+  assert.equal(doc.focusedKey(), 'more');
+  // "Show more" is replaced by what it loaded: the focus lands on the first of it.
+  doc.setBlocks([{ runs: [{ text: 'new heading' }] }, row('a'), row('b'), row('c'), row('d')]);
+  doc.focusOn('more', doc.focusedIndex());
+  doc.layout({ small, medium }, 400, 200);
+  assert.equal(doc.focusedKey(), 'c');
 });

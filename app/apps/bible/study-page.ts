@@ -16,9 +16,11 @@ export type OpenReading = (verseId: number, ctx: LayerContext) => void;
 /**
  * A page of study material (a verse's notes and words, a word's lexicon
  * entry and uses) on the ring: a StudyDocument under a title line, with the
- * gesture hints below. Swipes step through the page's links, tap follows the
- * focused one, double-tap goes back. Sections fold: their headings are stops
- * too, and tapping one opens or closes it.
+ * gesture hints below. Swipes move block by block, and a quick swipe that
+ * the R1 reports several times moves several blocks, as in the system menus;
+ * inside a block's references each swipe moves exactly one. Tap opens the
+ * block or steps into its references; double-tap steps back out, then goes
+ * back. Sections fold: tapping a heading opens or closes it.
  */
 export abstract class StudyPage implements Layer {
   protected readonly doc = new StudyDocument();
@@ -30,11 +32,16 @@ export abstract class StudyPage implements Layer {
   protected abstract title(): string;
   protected abstract buildBlocks(): StudyBlock[];
 
-  /** Rebuild the page (after a section opens or more items load), keeping the focus where it was. */
+  /**
+   * Rebuild the page (after a section opens or more items load), keeping the
+   * focus on the same block, or at its place when it is gone ("Show more"
+   * gives way to the first of what it loaded).
+   */
   protected rebuild(): void {
     const key = this.doc.focusedKey();
+    const index = this.doc.focusedIndex();
     this.doc.setBlocks(this.buildBlocks());
-    this.doc.focusOn(key);
+    this.doc.focusOn(key, index);
   }
 
   protected isOpen(section: string, openByDefault: boolean): boolean {
@@ -63,7 +70,10 @@ export abstract class StudyPage implements Layer {
   }
 
   handleInput(event: InputEvent, ctx: LayerContext): void {
-    if (!this.swipeFilter.accept(event)) return;
+    // The filter sees every event (it learns from ring-press), but only
+    // steps through references need one step per swipe.
+    const fresh = this.swipeFilter.accept(event);
+    if (event.type === "ring-press" || (!fresh && this.doc.inLinks())) return;
     switch (event.type) {
       case "scroll-down":
         this.doc.moveDown();
@@ -75,7 +85,8 @@ export abstract class StudyPage implements Layer {
         this.doc.activate(ctx);
         return;
       case "double-click":
-        ctx.stack.pop();
+        if (this.doc.inLinks()) this.doc.leaveLinks();
+        else ctx.stack.pop();
         return;
       default:
         return;
@@ -107,9 +118,10 @@ export abstract class StudyPage implements Layer {
       const thumb = Math.max(10, Math.round(viewHeight * visible));
       image.fillRect(trackX, headerHeight + Math.round((viewHeight - thumb) * position), 2, thumb, 120);
     }
+    const tap = this.doc.tapMeaning();
     const hints = gestureHints([
-      [GESTURE_CLICK, this.doc.hasFocus() ? "open" : "—"],
-      [GESTURE_DOUBLE_CLICK, "back"],
+      ...(tap === "none" ? [] : [[GESTURE_CLICK, tap === "links" ? "references" : "open"] as [string, string]]),
+      [GESTURE_DOUBLE_CLICK, this.doc.inLinks() ? "done" : "back"],
     ]);
     image.drawText(small, Math.round(width - MARGIN_X - small.measureText(hints)), footerY, hints, 110);
     return image;
