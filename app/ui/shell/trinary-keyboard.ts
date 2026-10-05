@@ -1,19 +1,23 @@
 /**
  * The ring keyboard's character tree and the cursor that walks it. Every
- * group splits its characters into three parts — top, middle, bottom — which
- * the Text input dialog draws as three stacked boxes: swipe up zooms into
- * the top box, swipe down into the bottom one, tap into the middle one (or
- * types it when it is a single character), double-tap zooms back out.
+ * group splits its keys into three parts — top, middle, bottom — which the
+ * Text input dialog draws as three stacked boxes: swipe up zooms into the top
+ * box, swipe down into the bottom one, tap into the middle one, and a box
+ * that holds a single key types it. Double-tap zooms back out.
  *
- * The keyboard opens, and returns after every character but a digit, at
- * the letters group: 26 letters and space in nine rows of three. The middle of each row
- * is one of the nine most common characters (space and the eight most
- * common English letters), so those take two moves and a tap while the rest
- * take three moves and a tap. One zoom out from the letters is the root,
- * with numbers and punctuation above the letters and everything else (a
- * deeper tree: accents, symbols, arrows, box drawing, Greek, Cyrillic, kana)
- * below. A digit returns to numbers and punctuation instead, since most
- * numbers run to more than one digit.
+ * The keyboard opens, and returns after every character but a digit, at the
+ * letters group: 26 letters and space in nine rows of three, every one three
+ * moves away. The middle of each row, typed with a tap, is one of the nine
+ * most common characters (space and the eight most common English letters).
+ * One zoom out from the letters is the root, with numbers and punctuation
+ * above the letters and everything else (a deeper tree: accents, symbols,
+ * arrows, box drawing, Greek, Cyrillic, kana) below. A digit returns to
+ * numbers and punctuation instead, since most numbers run to more than one
+ * digit.
+ *
+ * Keys carry a shifted character, as on a US keyboard: capitals for letters,
+ * the symbol above each digit and punctuation key (1!, ,<, \|), so all of
+ * ASCII fits in two boxes of 27.
  *
  * Kept free of NativeScript imports so tests can load it under plain node.
  */
@@ -22,6 +26,8 @@ export type KeyLeaf = {
   readonly kind: "key";
   /** What typing the key inserts. */
   readonly text: string;
+  /** What it inserts with shift, when that isn't its capital (QWERTY symbol pairs). */
+  readonly shifted?: string;
   /** What the key shows when that isn't its text (Enter, Tab); space is drawn specially. */
   readonly label?: string;
 };
@@ -46,8 +52,13 @@ export const SLOT_MIDDLE = 1;
 export const SLOT_BOTTOM = 2;
 export type Slot = typeof SLOT_TOP | typeof SLOT_MIDDLE | typeof SLOT_BOTTOM;
 
-export function key(text: string, label?: string): KeyLeaf {
-  return label === undefined ? { kind: "key", text } : { kind: "key", text, label };
+export function key(text: string, label?: string, shifted?: string): KeyLeaf {
+  return {
+    kind: "key",
+    text,
+    ...(shifted !== undefined ? { shifted } : {}),
+    ...(label !== undefined ? { label } : {}),
+  };
 }
 
 export const SPACE = key(" ");
@@ -74,7 +85,15 @@ function row(text: string): KeyNode {
   return slots(chars(text).map((char) => SPECIAL_KEYS[char] ?? key(char)));
 }
 
-/** A group of three rows, e.g. rows("123", "456", "789"). */
+/** A row of QWERTY pairs, e.g. pairs("1! 2@ 3#"): each key's character, then its shifted one. */
+function pairs(spec: string): KeyNode {
+  return slots(spec.split(" ").map((pair) => {
+    const [text, shifted] = chars(pair);
+    return key(text!, undefined, shifted);
+  }));
+}
+
+/** A group of three rows, e.g. rows("bac", "def", "ghj"). */
 function rows(top: string, middle: string, bottom: string, label?: string, preview?: string): KeyGroup {
   return group([row(top), row(middle), row(bottom)], label, preview);
 }
@@ -116,19 +135,16 @@ export const LETTERS: KeyGroup = group([
   rows("usv", "wtx", "y z"),
 ], "Letters", "abc");
 
-/** Digits 1-9 as a phone keypad; 0 sits in the middle of the arithmetic symbols. */
-const DIGITS: KeyGroup = rows("123", "456", "789", "Digits", "123");
-
-const PUNCTUATION: KeyGroup = rows("?,!", "'.\"", ":-;", "Punctuation", ".,?!");
-
-/** The rest of ASCII, with 0, Enter and Tab. */
-const SYMBOLS: KeyGroup = group([
-  rows("([{", "<|>", ")]}"),
-  rows("+=-", "*0/", "%^~"),
-  rows("#$&", "@_\\", "`\n\t"),
-], "Symbols & keys", "0+(↵");
-
-const NUMBERS_AND_PUNCTUATION: KeyGroup = group([DIGITS, PUNCTUATION, SYMBOLS], "Numbers & punctuation", "123 .,?");
+/**
+ * Digits and punctuation on QWERTY keys, so every one is three moves from
+ * here: 1-9 as a phone keypad, the common punctuation in the middle box (the
+ * period a tap, tap, tap), and the rest with Enter and Tab below.
+ */
+const NUMBERS_AND_PUNCTUATION: KeyGroup = group([
+  group([pairs("1! 2@ 3#"), pairs("4$ 5% 6^"), pairs("7& 8* 9(")], "Digits"),
+  group([pairs(";: ,< '\""), pairs("/? .> -_"), pairs("[{ 0) ]}")], "Punctuation"),
+  group([pairs("`~ \\| =+"), ENTER, TAB], "Symbols & keys"),
+], "Numbers & punctuation", "1! .,?");
 
 const ACCENTED = spread(
   "àáâäãåæçèéêëìíîïñòóôöõøùúûü" +
@@ -201,9 +217,14 @@ export function firstKeys(node: KeyNode, count: number): KeyLeaf[] {
   return out;
 }
 
-/** What long-press types for a key: its capital, where it has one. */
-export function capitalOf(leaf: KeyLeaf): string {
-  return leaf.text.toUpperCase();
+/**
+ * What a key types with shift: its pair, or its capital where that is one
+ * character; keys with neither (space, symbols, kana) type themselves.
+ */
+export function shiftedText(leaf: KeyLeaf): string {
+  if (leaf.shifted !== undefined) return leaf.shifted;
+  const upper = leaf.text.toUpperCase();
+  return chars(upper).length === 1 ? upper : leaf.text;
 }
 
 /**
@@ -223,10 +244,11 @@ export type KeyboardOutcome =
 
 /**
  * Where the wearer is in the tree. The path runs from the root to the
- * current node; it never empties (the root is always on it).
+ * current group; it never empties (the root is always on it). Keys are typed
+ * on the way in, never stood on.
  */
 export class TrinaryKeyboard {
-  private path: KeyNode[] = [];
+  private path: KeyGroup[] = [];
 
   constructor() {
     this.reset();
@@ -237,7 +259,7 @@ export class TrinaryKeyboard {
     this.path = [KEYBOARD_ROOT, group];
   }
 
-  current(): KeyNode {
+  current(): KeyGroup {
     return this.path[this.path.length - 1]!;
   }
 
@@ -253,47 +275,30 @@ export class TrinaryKeyboard {
   trail(): string[] {
     const labels: string[] = [];
     for (const node of this.path) {
-      if (node.kind === "group" && node.label) labels.push(node.label);
+      if (node.label) labels.push(node.label);
     }
     return labels;
   }
 
-  /** The key a tap (or long-press) types right now, if any. */
-  tapKey(): KeyLeaf | null {
-    const current = this.current();
-    if (current.kind === "key") return current;
-    const middle = current.children[SLOT_MIDDLE];
-    return middle?.kind === "key" ? middle : null;
+  /** Swipe up / swipe down: zoom into the top or bottom box, or type it when it is one key. */
+  zoom(slot: typeof SLOT_TOP | typeof SLOT_BOTTOM, shifted = false): KeyboardOutcome {
+    return this.enter(this.current().children[slot] ?? null, shifted);
   }
 
-  /** Swipe up / swipe down: zoom into the top or bottom box. */
-  zoom(slot: typeof SLOT_TOP | typeof SLOT_BOTTOM): KeyboardOutcome {
-    const current = this.current();
-    if (current.kind === "key") return { kind: "none" };
-    const child = current.children[slot];
+  /** Tap: the same for the middle box. */
+  tap(shifted = false): KeyboardOutcome {
+    return this.enter(this.current().children[SLOT_MIDDLE] ?? null, shifted);
+  }
+
+  private enter(child: KeyNode | null, shifted: boolean): KeyboardOutcome {
     if (!child) return { kind: "none" };
-    this.path.push(child);
-    return { kind: "moved" };
-  }
-
-  /**
-   * Tap: type the single key in view (or the middle box, when that is one
-   * key), otherwise zoom into the middle box. `capital` is long-press, which
-   * only types: it never zooms.
-   */
-  tap(capital = false): KeyboardOutcome {
-    const leaf = this.tapKey();
-    if (leaf) {
-      const text = capital ? capitalOf(leaf) : leaf.text;
-      this.reset(groupAfter(text));
-      return { kind: "typed", text };
+    if (child.kind === "group") {
+      this.path.push(child);
+      return { kind: "moved" };
     }
-    if (capital) return { kind: "none" };
-    const current = this.current();
-    const middle = current.kind === "group" ? current.children[SLOT_MIDDLE] : null;
-    if (!middle) return { kind: "none" };
-    this.path.push(middle);
-    return { kind: "moved" };
+    const text = shifted ? shiftedText(child) : child.text;
+    this.reset(groupAfter(text));
+    return { kind: "typed", text };
   }
 
   /** Double-tap: zoom out one level. False at the root, where there is nowhere further out. */

@@ -18,18 +18,13 @@ const kb = load('app/ui/shell/trinary-keyboard.ts');
 // Objects made inside the vm context have its prototypes; compare as plain data.
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-/** Every key under a node with the gestures it takes from there (zooms plus the typing tap). */
+/** Every key under a node with the gestures it takes from there: each level is one move, and entering a key types it. */
 function keyCosts(node, spent = 0, out = []) {
   if (node.kind === 'key') {
-    out.push({ text: node.text, gestures: spent + 1 });
+    out.push({ key: node, text: node.text, shifted: kb.shiftedText(node), gestures: spent });
     return out;
   }
-  node.children.forEach((child, slot) => {
-    if (!child) return;
-    // A tap types a single middle key directly; anything else is one zoom away.
-    if (slot === kb.SLOT_MIDDLE && child.kind === 'key') out.push({ text: child.text, gestures: spent + 1 });
-    else keyCosts(child, spent + 1, out);
-  });
+  for (const child of node.children) if (child) keyCosts(child, spent + 1, out);
   return out;
 }
 
@@ -41,33 +36,29 @@ function groups(node, out = []) {
   return out;
 }
 
-test('the letters are a-z and space, with the nine most common characters a tap away at the last step', () => {
+test('the letters are a-z and space, three moves each, with the nine most common typed by the final tap', () => {
   const costs = keyCosts(kb.LETTERS);
   assert.equal(costs.length, 27);
   assert.deepEqual(costs.map((c) => c.text).sort(), [...' abcdefghijklmnopqrstuvwxyz']);
-  const quick = costs.filter((c) => c.gestures === 3).map((c) => c.text).sort();
-  assert.deepEqual(quick, [...' aehinost']);
-  assert.ok(costs.every((c) => c.gestures === 3 || c.gestures === 4));
-  // Three boxes of three rows of three.
-  for (const box of kb.LETTERS.children) {
-    assert.equal(box.kind, 'group');
-    for (const row of box.children) assert.equal(row.children.filter(Boolean).length, 3);
-  }
+  assert.ok(costs.every((c) => c.gestures === 3));
+  const middles = kb.LETTERS.children.flatMap((box) => box.children.map((row) => row.children[kb.SLOT_MIDDLE].text));
+  assert.deepEqual(plain(middles).sort(), [...' aehinost']);
+  // Shift gives the capitals; space has no twin.
+  assert.equal(costs.find((c) => c.text === 'q').shifted, 'Q');
+  assert.equal(costs.find((c) => c.text === ' ').shifted, ' ');
 });
 
-test('every printable ASCII character, Enter and Tab can be typed from the root, numbers and punctuation on top', () => {
-  const typed = new Set(keyCosts(kb.KEYBOARD_ROOT).map((c) => c.text));
-  for (let code = 0x20; code <= 0x7e; code++) {
-    const char = String.fromCharCode(code);
-    if (/[A-Z]/.test(char)) continue; // capitals are long-press on the lowercase key
-    assert.ok(typed.has(char), JSON.stringify(char));
-  }
+test('all of printable ASCII, Enter and Tab sit on 23 QWERTY keys at most four moves from the root, numbers and punctuation on top', () => {
+  const top = keyCosts(kb.KEYBOARD_ROOT.children[kb.SLOT_TOP], 1);
+  assert.equal(top.length, 23);
+  assert.ok(top.every((c) => c.gestures === (c.text === '\n' || c.text === '\t' ? 3 : 4)));
+  const typed = new Set(keyCosts(kb.KEYBOARD_ROOT).flatMap((c) => [c.text, c.shifted]));
+  for (let code = 0x20; code <= 0x7e; code++) assert.ok(typed.has(String.fromCharCode(code)), String.fromCharCode(code));
   assert.ok(typed.has('\n')); assert.ok(typed.has('\t'));
-  // Digits and common punctuation: double-tap out to the root, then five or six gestures.
-  const top = keyCosts(kb.KEYBOARD_ROOT.children[kb.SLOT_TOP]);
-  for (const char of '0123456789.,?!\'"') {
-    const key = top.find((c) => c.text === char);
-    assert.ok(key && key.gestures + 1 <= 6, char);
+  // US keyboard pairs.
+  const pair = (char) => top.find((c) => c.text === char)?.shifted;
+  for (const [base, shifted] of ['1!', '2@', '3#', '4$', '5%', '6^', '7&', '8*', '9(', '0)', '`~', '-_', '=+', '[{', ']}', '\\|', ';:', '\'"', ',<', '.>', '/?']) {
+    assert.equal(pair(base), shifted, base);
   }
   assert.equal(kb.KEYBOARD_ROOT.children[kb.SLOT_MIDDLE], kb.LETTERS);
   // The bottom set reaches well past ASCII and is the deepest.
@@ -75,41 +66,41 @@ test('every printable ASCII character, Enter and Tab can be typed from the root,
   for (const char of ['é', '€', '→', '┼', '★', 'ω', 'ж', 'あ', 'ア', '。']) {
     assert.ok(more.some((c) => c.text === char), char);
   }
-  const deepest = (node) => kb.nodeDepth(node);
-  assert.ok(deepest(kb.KEYBOARD_ROOT.children[kb.SLOT_BOTTOM]) > deepest(kb.KEYBOARD_ROOT.children[kb.SLOT_TOP]));
+  assert.equal(more.find((c) => c.text === 'ж').shifted, 'Ж');
+  assert.equal(more.find((c) => c.text === 'ß').shifted, 'ß'); // its capital would be two letters
+  assert.ok(kb.nodeDepth(kb.KEYBOARD_ROOT.children[kb.SLOT_BOTTOM]) > kb.nodeDepth(kb.KEYBOARD_ROOT.children[kb.SLOT_TOP]));
 });
 
-test('every group offers at least two boxes and every key is a single character', () => {
+test('every group offers at least two boxes and every key types single characters', () => {
   for (const group of groups(kb.KEYBOARD_ROOT)) {
     assert.equal(group.children.length, 3);
     assert.ok(group.children.filter(Boolean).length >= 2, group.label ?? JSON.stringify(group.children));
   }
-  for (const { text } of keyCosts(kb.KEYBOARD_ROOT)) assert.equal(Array.from(text).length, 1, text);
+  for (const { text, shifted } of keyCosts(kb.KEYBOARD_ROOT)) {
+    assert.equal(Array.from(text).length, 1, text);
+    assert.equal(Array.from(shifted).length, 1, shifted);
+  }
 });
 
-test('the cursor opens at the letters, types with swipes and taps, and returns there after each key (digits to the numbers)', () => {
+test('the cursor opens at the letters, types a key by entering it, and returns to the letters (digits to the numbers)', () => {
   const k = new kb.TrinaryKeyboard();
   assert.ok(k.isAtHome()); assert.deepEqual(plain(k.trail()), ['Letters']);
   const type = (...moves) => {
     let outcome;
     for (const move of moves) {
-      outcome = move === 'up' ? k.zoom(kb.SLOT_TOP) : move === 'down' ? k.zoom(kb.SLOT_BOTTOM)
-        : k.tap(move === 'hold');
+      const shifted = move.endsWith('!');
+      const name = move.replace('!', '');
+      outcome = name === 'up' ? k.zoom(kb.SLOT_TOP, shifted) : name === 'down' ? k.zoom(kb.SLOT_BOTTOM, shifted) : k.tap(shifted);
     }
     return outcome;
   };
   assert.deepEqual(plain(type('down', 'tap', 'tap')), { kind: 'typed', text: 't' });
   assert.ok(k.isAtHome());
   assert.deepEqual(plain(type('up', 'down', 'tap')), { kind: 'typed', text: 'h' });
-  assert.deepEqual(plain(type('up', 'tap', 'hold')), { kind: 'typed', text: 'E' });
-  // A side key is zoomed into first, then typed (or capitalized) on its own.
-  assert.deepEqual(plain(type('up', 'up', 'up')), { kind: 'moved' });
-  assert.equal(k.current().text, 'b');
-  assert.deepEqual(plain(k.zoom(kb.SLOT_TOP)), { kind: 'none' });
-  assert.deepEqual(plain(k.tap(true)), { kind: 'typed', text: 'B' });
-  // Long-press never zooms.
-  assert.deepEqual(plain(k.tap(true)), { kind: 'none' }); assert.ok(k.isAtHome());
-  // Space is the middle of the last row.
+  // Swiping into a side key types it: no confirming tap.
+  assert.deepEqual(plain(type('up', 'up')), { kind: 'moved' });
+  assert.deepEqual(plain(type('up')), { kind: 'typed', text: 'b' });
+  assert.deepEqual(plain(type('up', 'tap', 'tap!')), { kind: 'typed', text: 'E' });
   assert.deepEqual(plain(type('down', 'down', 'tap')), { kind: 'typed', text: ' ' });
   // Double-tap zooms out to the root, then has nowhere further to go.
   k.zoom(kb.SLOT_TOP);
@@ -119,13 +110,18 @@ test('the cursor opens at the letters, types with swipes and taps, and returns t
   // A digit returns to numbers and punctuation, ready for the next digit or a decimal point.
   assert.deepEqual(plain(type('up', 'up', 'tap', 'tap')), { kind: 'typed', text: '5' });
   assert.deepEqual(plain(k.trail()), ['Numbers & punctuation']);
-  assert.deepEqual(plain(type('down', 'tap', 'tap', 'tap')), { kind: 'typed', text: '0' });
+  assert.deepEqual(plain(type('tap', 'down', 'tap')), { kind: 'typed', text: '0' });
   assert.deepEqual(plain(k.trail()), ['Numbers & punctuation']);
   assert.deepEqual(plain(type('tap', 'tap', 'tap')), { kind: 'typed', text: '.' });
   assert.ok(k.isAtHome());
+  // Shifted, a digit key types its symbol, which returns to the letters.
   k.back();
-  assert.deepEqual(plain(type('up', 'down', 'down', 'down', 'tap')), { kind: 'typed', text: '\n' });
-  k.back(); k.tap();
+  assert.deepEqual(plain(type('up', 'up', 'up', 'up!')), { kind: 'typed', text: '!' });
+  assert.ok(k.isAtHome());
+  k.back();
+  assert.deepEqual(plain(type('up', 'down', 'tap')), { kind: 'typed', text: '\n' });
+  k.back();
+  assert.deepEqual(plain(type('up', 'down', 'down')), { kind: 'typed', text: '\t' });
   assert.ok(k.isAtHome());
 });
 
@@ -183,17 +179,26 @@ function dialog(targets = ['app', 'assistant']) {
   return { stack, layer, sent, input, at, closed: () => closed, renders: () => renders };
 }
 
-test('the dialog types with the ring, capitalizes on long-press and deletes on tap-then-hold', async () => {
+test('the dialog types with the ring, long-press shifts once, twice locks, a third turns it off; tap-then-hold deletes', async () => {
   const d = dialog();
   assert.equal(d.layer.acceptsHoldGestures, true);
-  await d.input('scroll-up', 'scroll-down', 'long-press');            // H
-  await d.input('scroll-down', 'scroll-up', 'scroll-up', 'click');    // u
+  await d.input('long-press', 'scroll-up', 'scroll-down', 'click');   // shift, H
+  await d.input('scroll-down', 'scroll-up', 'scroll-up');             // u: swiping into it types it
   await d.input('ring-press');                                        // ignored
   assert.equal(d.layer.getText(), 'Hu');
   await d.input('short-then-long-press');
   await d.input('click', 'scroll-up', 'click');                       // i
   assert.equal(d.layer.getText(), 'Hi');
-  await d.input('short-then-long-press', 'short-then-long-press', 'short-then-long-press');
+  await d.input('long-press', 'long-press');                          // caps lock
+  await d.input('scroll-up', 'scroll-up', 'click');                   // A
+  await d.input('scroll-up', 'scroll-up', 'scroll-up');               // B, still locked
+  await d.input('long-press');                                        // off
+  await d.input('scroll-up', 'scroll-up', 'scroll-down');             // c
+  assert.equal(d.layer.getText(), 'HiABc');
+  await d.input('long-press', 'scroll-down', 'scroll-down', 'click'); // shift, space: shift spent on it
+  await d.input('scroll-up', 'click', 'click');                       // e, unshifted
+  assert.equal(d.layer.getText(), 'HiABc e');
+  for (let i = 0; i < 7; i++) await d.input('short-then-long-press');
   assert.equal(d.layer.getText(), '');
 });
 
@@ -207,25 +212,15 @@ test('each touch starts a new swipe however fast; the extra reports of one R1 sw
   assert.equal(d.layer.getText(), 'h');
 });
 
-test('a held swipe into a top or bottom key types its capital; a swipe with one repeat does not', async () => {
+test('a repeat of the swipe that typed a key types nothing more', async () => {
   const d = dialog();
   const send = (type, gapMs) => d.stack.handleInput(d.at(type, gapMs));
-  // Into b a c / d e f / g h j, then g h j: a group, so repeats only zoom once.
-  await send('ring-press', 600); await send('scroll-up', 150); await send('scroll-up', 90); await send('scroll-up', 90);
-  await send('ring-press', 600); await send('scroll-down', 150);
-  // Swipe up into g and hold: the third report types G.
-  await send('ring-press', 600); await send('scroll-up', 150); await send('scroll-up', 90); await send('scroll-up', 90);
-  assert.equal(d.layer.getText(), 'G');
-  await send('scroll-up', 90);                                   // a fourth report types nothing more
-  assert.equal(d.layer.getText(), 'G');
+  await send('ring-press', 600); await send('scroll-up', 150);   // b a c / d e f / g h j
+  await send('ring-press', 600); await send('scroll-down', 150); // g h j
+  await send('ring-press', 600); await send('scroll-up', 150);   // g
+  await send('scroll-up', 90); await send('scroll-up', 90);      // the ring repeating that swipe
+  assert.equal(d.layer.getText(), 'g');
   assert.ok(d.layer.keyboard.isAtHome());
-  // An ordinary swipe that sends one repeat just shows the key; a tap types it.
-  await send('ring-press', 600); await send('scroll-up', 150);
-  await send('ring-press', 600); await send('scroll-down', 150);
-  await send('ring-press', 600); await send('scroll-up', 150); await send('scroll-up', 90);
-  assert.equal(d.layer.getText(), 'G');
-  await send('click', 600);
-  assert.equal(d.layer.getText(), 'Gg');
 });
 
 test('without ring-press a ring swipe is new once the last report is 250 ms old; watch swipes are never dropped', async () => {
@@ -278,8 +273,11 @@ test('every level paints inside the dialog box', async () => {
   check();                                                             // the letters
   await d.input('scroll-up'); check();                                 // a box of nine
   await d.input('scroll-down'); check();                               // a row of three
-  await d.input('scroll-up'); check();                                 // a single key
-  await d.input('click', 'double-click'); check();                     // the root
+  await d.input('long-press'); check();                                // shifted: Gg Hh Jj
+  await d.input('scroll-up'); check();                                 // G typed, back at the letters
+  await d.input('scroll-up', 'double-click', 'double-click'); check(); // the root
+  await d.input('scroll-up', 'scroll-down'); check();                  // Enter and Tab, large
+  await d.input('double-click', 'double-click'); check();              // the root again
   await d.input('scroll-down', 'scroll-down', 'scroll-down'); check(); // deep in More
   await d.input('double-click', 'double-click', 'double-click', 'double-click'); check(); // menu
 });
@@ -310,7 +308,7 @@ test('Text input in the system menu opens the ring keyboard over the window, whi
   const send = (type) => shell.receiveInput({ ...gestures.makeInputEvent({ type, source: 'ring' }), timestampMs: clock += 600 });
   await send('ring-press');
   assert.equal(shell.stack.layers.at(-1).touchedSinceSwipe, true);                     // the shell routed the touch to the keyboard
-  for (const type of ['scroll-up', 'scroll-down', 'long-press']) await send(type);    // H, a long-press through the shell
+  for (const type of ['long-press', 'scroll-up', 'scroll-down', 'click']) await send(type); // shift (through the shell), H
   for (const type of ['click', 'scroll-up', 'click']) await send(type);              // i
   for (const type of ['scroll-up', 'click', 'click', 'short-then-long-press']) await send(type); // e, deleted
   for (const type of ['double-click', 'double-click', 'click']) await send(type);    // menu, Type Into App

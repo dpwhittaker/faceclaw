@@ -18,11 +18,11 @@ import { Layer, type LayerActions, type LayerContext } from "../layers";
 import { drawSelectionHighlight } from "../menu";
 import { inputDialogRect, paintInputDialog, paintInputDialogBox } from "./input-dialog";
 import {
-  capitalOf,
   firstKeys,
   type KeyboardOutcome,
   type KeyNode,
   nodeDepth,
+  shiftedText,
   SLOT_BOTTOM,
   SLOT_MIDDLE,
   SLOT_TOP,
@@ -51,9 +51,10 @@ const GESTURE_COLUMN = 22;
 const TEXT_INSET = 16;
 const BOX_GESTURES = [GESTURE_SCROLL_UP, GESTURE_CLICK, GESTURE_SCROLL_DOWN] as const;
 
-// Key brightness: the middle column (the keys a tap types) stands out.
-const KEY_TAP = 255;
-const KEY_OTHER = 175;
+// A key shows the character it types now, and dimmer beside it the one it
+// types with shift toggled.
+const KEY_ACTIVE = 255;
+const KEY_INACTIVE = 95;
 
 /**
  * One swipe on the R1 can arrive as two to four swipe reports 60-130 ms apart,
@@ -65,13 +66,8 @@ const KEY_OTHER = 175;
  */
 const SWIPE_REPEAT_MS = 250;
 
-/**
- * A swipe carried on past its first report keeps sending them: three or four
- * when swiping and holding, against at most two for an ordinary swipe (4 of 35
- * in a typing session sent a second). The report that reaches this count, with
- * a single key in view, types that key as a capital.
- */
-const HELD_SWIPE_REPORTS = 3;
+/** Shift: off, for the next character (one long-press), or locked (two). */
+type ShiftState = "off" | "once" | "lock";
 
 /** Tabs have no glyph; show them as the Tab key's label. */
 function displayText(text: string): string {
@@ -82,10 +78,11 @@ function displayText(text: string): string {
  * The ring keyboard ("Text input" in the system menu): types a message with
  * the ring alone, no phone or microphone. The keyboard is a three-way tree
  * (see trinary-keyboard.ts) drawn as three boxes — swipe up zooms into the
- * top one, swipe down the bottom one, tap the middle one or types it when it
- * is a single key; long-press types that key as a capital, and so does
- * swiping into a top or bottom key and holding the swipe; double-tap zooms
- * out; tap-then-hold deletes the last character. Double-tap at the outermost
+ * top one, swipe down the bottom one, tap the middle one, and a box holding a
+ * single key types it; double-tap zooms out; tap-then-hold deletes the last
+ * character. Long-press is shift: once for the next character, again for
+ * caps lock, again for off. Each key shows the character it types first and
+ * its shifted (or unshifted) twin dimmer after it. Double-tap at the outermost
  * level shows the same send / discard menu as the voice and phone keyboard
  * dialogs, plus Keep typing; double-tap there (or Keep typing) returns to the
  * keyboard, so a stray double-tap never throws away what was typed.
@@ -103,12 +100,10 @@ export class TextInputLayer implements Layer {
   private text = "";
   private phase: "keyboard" | "menu" = "keyboard";
   private menuIndex: number;
+  private shift: ShiftState = "off";
   /** A ring-press arrived since the last ring swipe report (see SWIPE_REPEAT_MS). */
   private touchedSinceSwipe = false;
   private lastRingSwipeAtMs = -Infinity;
-  /** The swipe in progress and how many reports it has sent (see HELD_SWIPE_REPORTS). */
-  private swipeType: "scroll-up" | "scroll-down" | null = null;
-  private swipeReports = 0;
 
   private readonly actions: LayerActions;
   private readonly onClosed: () => void;
@@ -138,30 +133,27 @@ export class TextInputLayer implements Layer {
     }
     if (isDirectionalInput(event)) {
       event = directionalFallback(event);
-    } else if (event.type === "scroll-up" || event.type === "scroll-down") {
-      if (!this.isNewSwipe(event)) {
-        this.continueSwipe(event.type);
-        return;
-      }
-      this.swipeType = event.type;
-      this.swipeReports = 1;
+    } else if ((event.type === "scroll-up" || event.type === "scroll-down") && !this.isNewSwipe(event)) {
+      return;
     }
     if (this.phase === "menu") {
       this.handleMenuInput(event);
       return;
     }
+    const shifted = this.shift !== "off";
     switch (event.type) {
       case "scroll-up":
-        this.apply(this.keyboard.zoom(SLOT_TOP));
+        this.apply(this.keyboard.zoom(SLOT_TOP, shifted));
         return;
       case "scroll-down":
-        this.apply(this.keyboard.zoom(SLOT_BOTTOM));
+        this.apply(this.keyboard.zoom(SLOT_BOTTOM, shifted));
         return;
       case "click":
-        this.apply(this.keyboard.tap());
+        this.apply(this.keyboard.tap(shifted));
         return;
       case "long-press":
-        this.apply(this.keyboard.tap(true));
+        this.shift = this.shift === "off" ? "once" : this.shift === "once" ? "lock" : "off";
+        this.actions.requestRender();
         return;
       case "short-then-long-press":
         this.deleteLast();
@@ -188,18 +180,12 @@ export class TextInputLayer implements Layer {
     return fresh;
   }
 
-  /** Another report for the swipe in progress: a held swipe into a single key types its capital. */
-  private continueSwipe(type: "scroll-up" | "scroll-down"): void {
-    if (type !== this.swipeType) return;
-    this.swipeReports++;
-    if (this.swipeReports === HELD_SWIPE_REPORTS && this.phase === "keyboard" && this.keyboard.current().kind === "key") {
-      this.apply(this.keyboard.tap(true));
-    }
-  }
-
   private apply(outcome: KeyboardOutcome): void {
     if (outcome.kind === "none") return;
-    if (outcome.kind === "typed") this.text += outcome.text;
+    if (outcome.kind === "typed") {
+      this.text += outcome.text;
+      if (this.shift === "once") this.shift = "off";
+    }
     this.actions.requestRender();
   }
 
@@ -287,6 +273,10 @@ export class TextInputLayer implements Layer {
     const textWidth = boxX - GESTURE_COLUMN - 8 - left;
 
     image.drawText(font, left, rect.y + 12, "Text", 220);
+    if (this.shift !== "off") {
+      const state = this.shift === "lock" ? "CAPS LOCK" : "SHIFT";
+      image.drawText(font, Math.round(left + textWidth - font.measureText(state)), rect.y + 12, state, 255);
+    }
     const trail = this.keyboard.isAtRoot() ? "All characters" : this.keyboard.trail().join(" › ");
     image.drawText(font, left, rect.y + 30, truncateLeft(font, trail, textWidth), 130);
 
@@ -295,15 +285,14 @@ export class TextInputLayer implements Layer {
     image.drawText(font, left, hintY, truncateText(font, this.hintText(), textWidth), 120);
 
     const boxHeight = Math.floor((rect.height - 2 * BOX_INSET - 2 * BOX_GAP) / 3);
-    const current = this.keyboard.current();
-    const view: ReadonlyArray<KeyNode | null> = current.kind === "key" ? [null, current, null] : current.children;
+    const shifted = this.shift !== "off";
+    const view = this.keyboard.current().children;
     for (let slot = SLOT_TOP; slot <= SLOT_BOTTOM; slot++) {
       const node = view[slot] ?? null;
       const y = rect.y + BOX_INSET + slot * (boxHeight + BOX_GAP);
       if (!node) {
-        // A group with an empty slot keeps its outline so the three boxes
-        // stay put; a single key in view shows only its own box.
-        if (current.kind === "group") image.drawRoundedRect(boxX, y, BOX_WIDTH, boxHeight, 35, 8);
+        // An empty slot keeps its outline so the three boxes stay put.
+        image.drawRoundedRect(boxX, y, BOX_WIDTH, boxHeight, 35, 8);
         continue;
       }
       if (slot === SLOT_MIDDLE) {
@@ -313,7 +302,7 @@ export class TextInputLayer implements Layer {
       }
       const gesture = BOX_GESTURES[slot]!;
       drawCentered(image, font, gesture, boxX - GESTURE_COLUMN / 2 - 4, y + ((boxHeight - font.lineHeight) >> 1), 120);
-      paintNode(image, node, boxX, y, BOX_WIDTH, boxHeight);
+      paintNode(image, node, boxX, y, BOX_WIDTH, boxHeight, shifted);
     }
   }
 
@@ -338,11 +327,10 @@ export class TextInputLayer implements Layer {
   }
 
   private hintText(): string {
-    const hints: Array<[string, string]> = [];
-    const leaf = this.keyboard.tapKey();
-    if (this.keyboard.current().kind === "key") hints.push([GESTURE_CLICK, "type"]);
-    hints.push([GESTURE_DOUBLE_CLICK, this.keyboard.isAtRoot() ? "finish" : "back"]);
-    if (leaf && capitalOf(leaf) !== leaf.text) hints.push([GESTURE_LONG_PRESS, "capital"]);
+    const hints: Array<[string, string]> = [
+      [GESTURE_DOUBLE_CLICK, this.keyboard.isAtRoot() ? "finish" : "back"],
+      [GESTURE_LONG_PRESS, this.shift === "off" ? "shift" : this.shift === "once" ? "caps lock" : "unshift"],
+    ];
     if (this.text) hints.push([GESTURE_SHORT_THEN_LONG_PRESS, "delete"]);
     return gestureHints(hints);
   }
@@ -357,22 +345,34 @@ function drawCentered(image: GrayImage, font: UiFont, text: string, centerX: num
 }
 
 /**
- * One key: its label, or for space an open-box mark drawn in pixels (the
- * glyph for it is missing from the bitmap fonts).
+ * One key: the character it types now, then — dimmer — the one it types with
+ * shift toggled, when that differs ("bB", or "Bb" while shifted). Enter and
+ * Tab show their labels; space an open-box mark drawn in pixels (the glyph
+ * for it is missing from the bitmap fonts).
  */
-function drawKey(image: GrayImage, font: UiFont, node: KeyNode, centerX: number, y: number, value: number): void {
+function drawKey(image: GrayImage, font: UiFont, node: KeyNode, centerX: number, y: number, shifted: boolean): void {
   if (node.kind !== "key") return;
-  if (node.text !== " ") {
-    drawCentered(image, font, node.label ?? node.text, centerX, y, value);
+  if (node.text === " ") {
+    const width = Math.max(8, Math.round(font.lineHeight * 0.6));
+    const tick = Math.max(3, Math.round(font.lineHeight * 0.2));
+    const x = Math.round(centerX - width / 2);
+    const baseline = y + font.ascent;
+    image.fillRect(x, baseline, width, 1, KEY_ACTIVE);
+    image.fillRect(x, baseline - tick, 1, tick, KEY_ACTIVE);
+    image.fillRect(x + width - 1, baseline - tick, 1, tick, KEY_ACTIVE);
     return;
   }
-  const width = Math.max(8, Math.round(font.lineHeight * 0.6));
-  const tick = Math.max(3, Math.round(font.lineHeight * 0.2));
-  const x = Math.round(centerX - width / 2);
-  const baseline = y + font.ascent;
-  image.fillRect(x, baseline, width, 1, value);
-  image.fillRect(x, baseline - tick, 1, tick, value);
-  image.fillRect(x + width - 1, baseline - tick, 1, tick, value);
+  const other = shiftedText(node);
+  if (node.label !== undefined || other === node.text) {
+    drawCentered(image, font, node.label ?? node.text, centerX, y, KEY_ACTIVE);
+    return;
+  }
+  const active = shifted ? other : node.text;
+  const inactive = shifted ? node.text : other;
+  const activeWidth = font.measureText(active);
+  const x = Math.round(centerX - (activeWidth + 1 + font.measureText(inactive)) / 2);
+  image.drawText(font, x, y, active, KEY_ACTIVE);
+  image.drawText(font, Math.round(x + activeWidth + 1), y, inactive, KEY_INACTIVE);
 }
 
 /**
@@ -380,26 +380,26 @@ function drawKey(image: GrayImage, font: UiFont, node: KeyNode, centerX: number,
  * up to nine keys as three rows (so the next two moves can be read off the
  * box); anything deeper as sample characters over the group's name.
  */
-function paintNode(image: GrayImage, node: KeyNode, x: number, y: number, width: number, height: number): void {
+function paintNode(image: GrayImage, node: KeyNode, x: number, y: number, width: number, height: number, shifted: boolean): void {
   const centerX = x + width / 2;
   const depth = nodeDepth(node);
   if (node.kind === "key") {
     const font = getDefaultLargeFont();
-    drawKey(image, font, node, centerX, y + ((height - font.lineHeight) >> 1), KEY_TAP);
+    drawKey(image, font, node, centerX, y + ((height - font.lineHeight) >> 1), shifted);
     return;
   }
   if (depth === 1) {
     const font = getDefaultMediumFont();
-    const pitch = width / 3.5;
+    const pitch = width / 3.2;
     const rowY = y + ((height - font.lineHeight) >> 1);
     node.children.forEach((child, column) => {
-      if (child) drawKey(image, font, child, centerX + (column - 1) * pitch, rowY, column === SLOT_MIDDLE ? KEY_TAP : KEY_OTHER);
+      if (child) drawKey(image, font, child, centerX + (column - 1) * pitch, rowY, shifted);
     });
     return;
   }
   if (depth === 2) {
     const font = getDefaultSmallFont();
-    const pitch = width / 4.5;
+    const pitch = width / 3.6;
     const rowPitch = Math.min(font.lineHeight + 4, (height - 6) / 3);
     const top = y + ((height - 3 * rowPitch) >> 1) + ((rowPitch - font.lineHeight) >> 1);
     node.children.forEach((child, rowIndex) => {
@@ -408,7 +408,7 @@ function paintNode(image: GrayImage, node: KeyNode, x: number, y: number, width:
       // A lone key in a row sits in the middle column: a tap types it.
       const keys: ReadonlyArray<KeyNode | null> = child.kind === "key" ? [null, child, null] : child.children;
       keys.forEach((keyNode, column) => {
-        if (keyNode) drawKey(image, font, keyNode, centerX + (column - 1) * pitch, rowY, column === SLOT_MIDDLE ? KEY_TAP : KEY_OTHER);
+        if (keyNode) drawKey(image, font, keyNode, centerX + (column - 1) * pitch, rowY, shifted);
       });
     });
     return;
@@ -419,6 +419,6 @@ function paintNode(image: GrayImage, node: KeyNode, x: number, y: number, width:
   const label = truncateText(small, node.label ?? "", width - 12);
   const blockHeight = medium.lineHeight + 2 + small.lineHeight;
   const top = y + ((height - blockHeight) >> 1);
-  drawCentered(image, medium, truncateText(medium, preview, width - 12), centerX, top, KEY_TAP);
+  drawCentered(image, medium, truncateText(medium, preview, width - 12), centerX, top, KEY_ACTIVE);
   drawCentered(image, small, label, centerX, top + medium.lineHeight + 2, 150);
 }
