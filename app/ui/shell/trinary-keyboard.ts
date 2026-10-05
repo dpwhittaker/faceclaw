@@ -6,10 +6,10 @@
  * that holds a single key types it. Double-tap zooms back out.
  *
  * The keyboard opens, and returns after every character but a digit, at the
- * letters group: 26 letters and space in nine rows of three, every one three
- * moves away. The middle of each row, typed with a tap, is one of the nine
- * most common characters (space and the eight most common English letters).
- * One zoom out from the letters is the root, with numbers and punctuation
+ * letters group: 26 letters and space, every one three moves away. Taps are
+ * the slow move (the ring holds each ~460 ms to rule out a double-tap, where
+ * a swipe arrives in ~170), so the commonest characters take the fewest: see
+ * LETTERS. One zoom out from the letters is the root, with numbers and punctuation
  * above the letters and everything else (a deeper tree: accents, symbols,
  * arrows, box drawing, Greek, Cyrillic, kana) below. A digit returns to
  * numbers and punctuation instead, since most numbers run to more than one
@@ -125,24 +125,30 @@ function spread(text: string, label: string, preview?: string): KeyGroup {
 }
 
 /**
- * The letters: in each row the middle character is one of space, e, t, a, o,
- * i, n, s, h — in alphabetical order down the middle column, space last —
- * and the other eighteen letters run alphabetically down the outer columns.
+ * The letters, placed by English frequency on routes ranked by their taps.
+ * Of the 27 routes (box, row, key; the middle of each is a tap), 8 are all
+ * swipes: the corners of the top and bottom boxes, for space, e, t, a, o, i,
+ * n, s (space is swipe down three times). The 12 with one tap take the next
+ * letters, c d f g h l m p r u w y. Of the two-tap routes, tap-swipe-tap
+ * cannot be read as a double-tap, so it takes b and v, and those with two
+ * taps in a row take j k q x; tap, tap, tap is z. Within each tier the
+ * letters run alphabetically in reading order.
  */
 export const LETTERS: KeyGroup = group([
-  rows("bac", "def", "ghj"),
-  rows("kil", "mnp", "qor"),
-  rows("usv", "wtx", "y z"),
+  rows("ace", "djf", "ign"),
+  rows("hbl", "kzq", "mvp"),
+  rows("ors", "uxw", "ty "),
 ], "Letters", "abc");
 
 /**
  * Digits and punctuation on QWERTY keys, so every one is three moves from
- * here: 1-9 as a phone keypad, the common punctuation in the middle box (the
- * period a tap, tap, tap), and the rest with Enter and Tab below.
+ * here: 1-9 as a phone keypad, the punctuation in the middle box with the
+ * commonest (, . ' -) on its single-tap corners, and the rest with Enter and
+ * Tab below.
  */
 const NUMBERS_AND_PUNCTUATION: KeyGroup = group([
   group([pairs("1! 2@ 3#"), pairs("4$ 5% 6^"), pairs("7& 8* 9(")], "Digits"),
-  group([pairs(";: ,< '\""), pairs("/? .> -_"), pairs("[{ 0) ]}")], "Punctuation"),
+  group([pairs(",< /? .>"), pairs("[{ ;: ]}"), pairs("'\" 0) -_")], "Punctuation"),
   group([pairs("`~ \\| =+"), ENTER, TAB], "Symbols & keys"),
 ], "Numbers & punctuation", "1! .,?");
 
