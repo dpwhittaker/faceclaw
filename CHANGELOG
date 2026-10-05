@@ -7,6 +7,7 @@
 * Add tokens and faceclaw-input script, which allows using a CLI utility as an input device for the glasses
 * Navigate app: Add map-without-destination mode
 * Text input in the system menu: type with the ring alone, on a keyboard that splits the characters into three boxes to zoom through
+* Bible app: the NET Bible with its translators' notes, cross-references, and Hebrew and Greek word studies (definitions, parsing, every use), chosen with the ring on full-screen three-way pickers. Its database is built on a computer with scripts/bible/ and pushed to the phone
 
 ### iOS port:
 

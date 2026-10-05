@@ -73,7 +73,8 @@
   {
     "reason": "Android SQLite persistence and cursor/content APIs",
     "files": [
-      "com/faceclaw/app/FaceclawConversationStore.java"
+      "com/faceclaw/app/FaceclawConversationStore.java",
+      "com/faceclaw/app/FaceclawReadOnlyDatabase.java"
     ]
   },
   {
