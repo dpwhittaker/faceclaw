@@ -244,7 +244,15 @@ public class FaceclawVoiceController {
         return Math.abs(delta) <= beamHalfWidthDeg;
     }
 
-    private void applySuppression(short[] pcm, int count) {
+    /**
+     * The suppressor works in whole 8 ms hops and carries the remainder into
+     * the next call, so an 800-sample packet comes back as 768 or 896
+     * samples. Its output is passed on at that length: fitting it back into
+     * the packet spliced raw samples in and dropped cleaned ones, an audible
+     * tick every 50 ms in recordings and in what the recognizers heard.
+     * Returns null to pass the audio through.
+     */
+    private short[] applySuppression(short[] pcm, int count) {
         try {
             if (suppressor == null) {
                 suppressor = new FaceclawNoiseSuppressor(SAMPLE_RATE);
@@ -255,13 +263,15 @@ public class FaceclawVoiceController {
                 le[i * 2 + 1] = (byte) ((pcm[i] >> 8) & 0xff);
             }
             byte[] cleaned = suppressor.process(le);
-            int cleanedCount = Math.min(count, cleaned.length / 2);
-            for (int i = 0; i < cleanedCount; i++) {
-                pcm[i] = (short) ((cleaned[i * 2] & 0xff) | (cleaned[i * 2 + 1] << 8));
+            short[] out = new short[cleaned.length / 2];
+            for (int i = 0; i < out.length; i++) {
+                out[i] = (short) ((cleaned[i * 2] & 0xff) | (cleaned[i * 2 + 1] << 8));
             }
+            return out;
         } catch (Throwable t) {
             Log.w(TAG, "noise suppression failed; passing audio through", t);
             suppressionEnabled = false;
+            return null;
         }
     }
 
@@ -632,7 +642,11 @@ public class FaceclawVoiceController {
      */
     private void processPcmChunk(short[] pcm, int count, int angleDegrees, int ssr, boolean hasFrameMeta) {
         if (suppressionEnabled) {
-            applySuppression(pcm, count);
+            short[] cleaned = applySuppression(pcm, count);
+            if (cleaned != null) {
+                pcm = cleaned;
+                count = cleaned.length;
+            }
         }
         if (recordingPcm != null) {
             appendRecording(pcm, count);
@@ -651,7 +665,7 @@ public class FaceclawVoiceController {
         if (hasFrameMeta) {
             emitFrameMeta(angleDegrees, ssr);
         }
-        if (mode != VoiceInputMode.CLOUD) {
+        if (mode != VoiceInputMode.CLOUD && count > 0) {
             float[] samples = new float[count];
             for (int i = 0; i < count; i++) {
                 samples[i] = pcm[i] / 32768.0f;
