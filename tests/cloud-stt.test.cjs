@@ -241,3 +241,33 @@ test('after a reconnect Soniox labels belong to a new stream, timed from the buf
   assert.equal(after.startMs, T0 + 60_000 + 200);
   h.client.stop();
 });
+
+test('Soniox hands out each sentence once, as soon as its last word is final, and the rest on finalize', () => {
+  const T0 = 1_790_000_000_000;
+  const h = harness('soniox');
+  h.client.acceptPcm(pcm(2000), T0);
+  h.open();
+  const sentences = () => h.events.flatMap((e) => Array.from(e.sentences ?? [], (s) => [s.speaker, s.text, s.startMs - T0, s.endMs - T0]));
+  h.message({ tokens: [
+    { text: 'It was', start_ms: 0, end_ms: 300, speaker: '1', is_final: true },
+    { text: ' in the', start_ms: 300, end_ms: 500, speaker: '1', is_final: false },
+  ] });
+  assert.deepEqual(sentences(), [], 'no sentence has ended');
+  h.message({ tokens: [
+    { text: ' Apocrypha.', start_ms: 300, end_ms: 900, speaker: '1', is_final: true },
+    { text: ' Since', start_ms: 1000, end_ms: 1200, speaker: '1', is_final: true },
+    { text: ' 380', start_ms: 1200, end_ms: 1500, speaker: '1', is_final: false },
+  ] });
+  assert.deepEqual(sentences(), [['1', 'It was Apocrypha.', 0, 900]], 'out before the utterance ends, without the next sentence');
+  assert.equal(h.events.at(-1).isFinal, false);
+  h.message({ tokens: [
+    { text: ' 3.', start_ms: 1200, end_ms: 1400, speaker: '1', is_final: true },
+    { text: '5', start_ms: 1400, end_ms: 1500, speaker: '1', is_final: true },
+  ] });
+  assert.equal(sentences().length, 1, 'a number\'s "3." doesn\'t end the sentence');
+  h.message({ tokens: [{ text: ' Really?', start_ms: 1600, end_ms: 1900, speaker: '2', is_final: true }, { text: '<fin>', is_final: true }] });
+  assert.deepEqual(sentences().slice(1), [['1', 'Since 3.5', 1000, 1500], ['2', 'Really?', 1600, 1900]]);
+  const final = h.events.find((e) => e.isFinal);
+  assert.deepEqual(Array.from(final.segments, (s) => s.text), ['It was Apocrypha. Since 3.5', 'Really?'], 'other apps still get the whole utterance');
+  h.client.stop();
+});

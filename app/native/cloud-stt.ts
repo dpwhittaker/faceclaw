@@ -20,6 +20,13 @@ export type CloudSttTranscriptEvent = {
    * words so far including unconfirmed ones.
    */
   segments?: SpeakerSegment[];
+  /**
+   * Words that just became final, cut at sentence ends, each delivered once
+   * (Soniox): a sentence as soon as its last word is confirmed, rather than
+   * at the pause that ends the utterance, and on the final event whatever
+   * was left. Cue sends these to its backend.
+   */
+  sentences?: SpeakerSegment[];
 };
 
 export type CloudSttOptions = {

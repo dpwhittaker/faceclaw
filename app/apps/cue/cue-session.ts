@@ -295,22 +295,25 @@ class CueSession {
       this.captions.push(...lines);
       if (this.captions.length > CAPTION_LINES_KEPT) this.captions.splice(0, this.captions.length - CAPTION_LINES_KEPT);
       this.partial = [];
-      if (current) {
-        if (segments.length) {
-          for (const [index, segment] of segments.entries()) {
-            const label = lines[index].speaker;
-            this.noticeStream(current.id, segment);
-            cueLink.channel.line(current.id, label, segment.text, segment.startMs, segment.endMs);
-            cueLink.recordings.line(current.id, { label, text: segment.text, startMs: segment.startMs, endMs: segment.endMs });
-            cueLink.voices.heard(current.id, label, segment.startMs, segment.endMs);
-          }
-        } else {
-          cueLink.channel.line(current.id, "", event.text.trim(), atMs, atMs);
-          cueLink.recordings.line(current.id, { label: "", text: event.text.trim(), startMs: atMs, endMs: atMs });
-        }
-      }
     } else {
       this.partial = lines;
+    }
+    if (current) {
+      // The backend gets each sentence as soon as Soniox confirms its last
+      // word, so Claude can speak up mid-monologue; other providers' words go
+      // at the end of the utterance.
+      const confirmed = (event.sentences ?? (event.isFinal ? segments : [])).filter((segment) => segment.text);
+      for (const segment of confirmed) {
+        const label = this.voice(current, segment);
+        this.noticeStream(current.id, segment);
+        cueLink.channel.line(current.id, label, segment.text, segment.startMs, segment.endMs);
+        cueLink.recordings.line(current.id, { label, text: segment.text, startMs: segment.startMs, endMs: segment.endMs });
+        cueLink.voices.heard(current.id, label, segment.startMs, segment.endMs);
+      }
+      if (!event.sentences && event.isFinal && !segments.length) {
+        cueLink.channel.line(current.id, "", event.text.trim(), atMs, atMs);
+        cueLink.recordings.line(current.id, { label: "", text: event.text.trim(), startMs: atMs, endMs: atMs });
+      }
     }
     const last = lines[lines.length - 1];
     if (last?.speaker) {

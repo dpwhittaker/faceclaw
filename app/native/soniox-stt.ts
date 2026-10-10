@@ -1,5 +1,5 @@
 import { CLOUD_STT_SAMPLE_RATE, CloudSttClient, CloudSttOptions, toJavaBytes } from "./cloud-stt";
-import { SpeakerRuns, TimedTranscript } from "./transcript-format";
+import { SpeakerRuns, TimedTranscript, type SpeakerSegment } from "./transcript-format";
 
 declare const com: any;
 
@@ -23,6 +23,15 @@ const MODEL_ID = "stt-rt-v5";
 
 export type SonioxSttOptions = CloudSttOptions;
 
+/**
+ * Whether final text ends a sentence: ".", "?" or "!" (closing quotes or
+ * brackets after it are fine), but not a number's "3." that may go on to
+ * "3.5".
+ */
+export function endsSentence(text: string): boolean {
+  return /[.?!]["'”’)\]]*\s*$/.test(text) && !/\d\.\s*$/.test(text);
+}
+
 // Speaker labels restart with every session, so each client numbers its own.
 let nextStream = 1;
 
@@ -38,6 +47,9 @@ export class SonioxSttClient implements CloudSttClient {
   // Concatenation of all final tokens so far.
   private finalText = "";
   private formatted = new TimedTranscript();
+  // Final tokens not yet handed out as sentences (event.sentences, for Cue).
+  private sentenceRuns = new SpeakerRuns();
+  private sentenceText = "";
   // The same final tokens grouped by speaker, for diarized consumers (Cue).
   private runs = new SpeakerRuns();
   private readonly stream = nextStream++;
@@ -176,6 +188,8 @@ export class SonioxSttClient implements CloudSttClient {
     let nonFinal = "";
     let preview: TimedTranscript | null = null;
     let previewRuns: SpeakerRuns | null = null;
+    // Sentences whose last word became final in this message.
+    const done: SpeakerSegment[] = [];
     for (const token of tokens) {
       const tokenText = String(token?.text ?? "");
       // Markers emitted by endpoint detection / manual finalize; not speech.
@@ -183,7 +197,7 @@ export class SonioxSttClient implements CloudSttClient {
         if (token?.is_final && this.finalText) {
           this.options.onTranscript({
             text: this.finalText, transcribeText: this.formatted.text, isFinal: true, paragraphBreakAfter: true,
-            segments: this.segments(this.runs),
+            segments: this.segments(this.runs), sentences: [...done.splice(0), ...this.takeSentences()],
           });
           this.finalText = "";
           this.formatted = new TimedTranscript();
@@ -195,6 +209,9 @@ export class SonioxSttClient implements CloudSttClient {
         this.finalText += tokenText;
         this.formatted.append({ ...token, text: tokenText });
         this.runs.append({ ...token, text: tokenText });
+        this.sentenceText += tokenText;
+        this.sentenceRuns.append({ ...token, text: tokenText });
+        if (endsSentence(this.sentenceText)) done.push(...this.takeSentences());
       } else {
         nonFinal += tokenText;
         preview ??= this.formatted.copy();
@@ -204,7 +221,7 @@ export class SonioxSttClient implements CloudSttClient {
       }
     }
     if (message?.finished) {
-      this.options.onTranscript({ text: this.finalText, transcribeText: this.formatted.text, isFinal: true, segments: this.segments(this.runs) });
+      this.options.onTranscript({ text: this.finalText, transcribeText: this.formatted.text, isFinal: true, segments: this.segments(this.runs), sentences: [...done.splice(0), ...this.takeSentences()] });
       if (this.finishing) this.stop();
       else this.options.onDisconnected?.("Soniox session ended; restarting transcription.");
       return;
@@ -213,8 +230,17 @@ export class SonioxSttClient implements CloudSttClient {
       this.options.onTranscript({
         text: this.finalText + nonFinal, transcribeText: (preview ?? this.formatted).text, isFinal: false,
         segments: this.segments(previewRuns ?? this.runs),
+        ...(done.length ? { sentences: done } : {}),
       });
     }
+  }
+
+  /** The final words not handed out yet, as sentences, and forget them. */
+  private takeSentences() {
+    const sentences = this.segments(this.sentenceRuns).filter((segment) => segment.text);
+    this.sentenceRuns = new SpeakerRuns();
+    this.sentenceText = "";
+    return sentences;
   }
 
   private segments(runs: SpeakerRuns) {
