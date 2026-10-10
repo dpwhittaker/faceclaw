@@ -20,6 +20,7 @@ function harness() {
       onEndContext: (contextId, reason) => events.ends.push([contextId, reason]),
       onAnswer: (askId, text, done) => events.answers.push([askId, text, done]),
       onTriage: (triage) => (events.triage ??= []).push(triage),
+      onReplies: (nid, replies) => (events.replies ??= []).push([nid, replies]),
       onNotebooks: (notebooks) => (events.notebooks ??= []).push(notebooks),
       onContextAck: (contextId, candidates) => (events.acks ??= []).push([contextId, candidates]),
       onSpeaker: (speaker) => (events.speakers ??= []).push(speaker),
@@ -104,10 +105,12 @@ test("backend frames reach the app", () => {
   h.last().handlers.onOpen();
   h.reply({ type: "session-ack", recent: [{ personId: "priya", name: "Priya", team: "", lastTalked: 5 }] });
   h.reply({ type: "cue", contextId: "c1", notebook: "work", entryId: "c:c1/x", category: "urgent", line: "That's Dana", title: "1:1 with Tom", detail: "Tom's new lead" });
+  h.reply({ type: "replies", nid: "m1", replies: ["Yes", "No"] });
   h.reply({ type: "end-context", contextId: "c1", reason: "wrap-up" });
   h.reply({ type: "answer", askId: "a1", text: "Because.", done: true });
   assert.equal(h.events.recent[0][0].name, "Priya");
   assert.deepEqual([h.events.cues[0].entryId, h.events.cues[0].category, h.events.cues[0].detail], ["c:c1/x", "urgent", "Tom's new lead"]);
+  assert.deepEqual(h.events.replies[0], ["m1", ["Yes", "No"]]);
   assert.deepEqual(h.events.ends[0], ["c1", "wrap-up"]);
   assert.deepEqual(h.events.answers[0], ["a1", "Because.", true]);
 });

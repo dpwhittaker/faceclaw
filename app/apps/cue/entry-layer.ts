@@ -13,7 +13,10 @@ export type EntryPopup = {
   heading: string;
   /** The message, or a cue's line and detail. */
   body: string;
-  options: EntryOption[];
+  /** Read again on every paint, so options that arrive later (suggested replies) show up. */
+  readonly options: EntryOption[];
+  /** Calls back when the options may have changed; returns the unsubscribe. */
+  onChange?: (listener: () => void) => () => void;
 };
 
 /** The message gets at least this many lines; past that, the options scroll. */
@@ -24,12 +27,16 @@ const MIN_BODY_LINES = 3;
  * through the options, click one; Back (the first, selected to start) or a
  * double-click closes and leaves it as it is. Sending one of the
  * notification's responses keeps the pop-up open, saying how it went, with
- * Dismiss selected. Hosted in a shell modal over any app, or in Cue's own
- * window.
+ * Dismiss selected. Options can change while it's up (Claude's suggested
+ * replies arrive a few seconds later); the selection stays on the option it
+ * was on, or goes back to Back if that one's gone. Hosted in a shell modal
+ * over any app, or in Cue's own window.
  */
 export class EntryPopupLayer implements Layer {
   private selected = 0;
+  private selectedLabel = "";
   private notice = "";
+  private unsubscribe: (() => void) | null = null;
 
   /** onChoose returns what a response did ("Sent: ..."), which keeps the pop-up open. */
   constructor(
@@ -39,6 +46,7 @@ export class EntryPopupLayer implements Layer {
   ) {}
 
   paint(ctx: LayerContext): GrayImage {
+    if (!this.unsubscribe && this.popup.onChange) this.unsubscribe = this.popup.onChange(() => ctx.actions.requestRender());
     const font = getDefaultSmallFont();
     const { width, height } = ctx.stack.getBaseSize();
     const image = new GrayImage(width, height, 0);
@@ -49,6 +57,7 @@ export class EntryPopupLayer implements Layer {
     image.drawText(font, 8, 2, truncateText(font, `${icon}${this.popup.heading}`, textWidth), 245);
 
     const options = this.popup.options;
+    this.follow(options);
     const footerY = height - font.lineHeight - 2;
     const bodyTop = 4 + step;
     const fit = Math.max(1, Math.floor((footerY - 2 - bodyTop - MIN_BODY_LINES * step) / rowHeight));
@@ -77,19 +86,42 @@ export class EntryPopupLayer implements Layer {
 
   handleInput(event: InputEvent): void {
     const options = this.popup.options;
+    this.follow(options);
     const count = options.length;
-    if (event.type === "scroll-up") this.selected = (this.selected + count - 1) % count;
-    else if (event.type === "scroll-down") this.selected = (this.selected + 1) % count;
+    if (event.type === "scroll-up") this.select(options, (this.selected + count - 1) % count);
+    else if (event.type === "scroll-down") this.select(options, (this.selected + 1) % count);
     else if (event.type === "click") {
       const option = options[this.selected];
       if (option?.action === "respond") {
         this.notice = this.onChoose(option) || "";
         const dismiss = options.findIndex((candidate) => candidate.action === "dismiss");
-        if (dismiss >= 0) this.selected = dismiss;
+        if (dismiss >= 0) this.select(options, dismiss);
         return;
       }
-      this.onClose();
+      this.close();
       if (option) this.onChoose(option);
-    } else if (event.type === "double-click") this.onClose();
+    } else if (event.type === "double-click") this.close();
+  }
+
+  onRemoved(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+  }
+
+  private close(): void {
+    this.onRemoved();
+    this.onClose();
+  }
+
+  private select(options: readonly EntryOption[], index: number): void {
+    this.selected = index;
+    this.selectedLabel = options[index]?.label ?? "";
+  }
+
+  /** Keeps the selection on its option when the options change; Back when it's gone. */
+  private follow(options: readonly EntryOption[]): void {
+    if (options[this.selected]?.label === this.selectedLabel) return;
+    const index = options.findIndex((option) => option.label === this.selectedLabel);
+    this.select(options, Math.max(0, index));
   }
 }

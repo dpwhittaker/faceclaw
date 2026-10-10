@@ -127,19 +127,28 @@ test("every entry offers Back first, then Dismiss and the categories it isn't", 
   assert.deepEqual(entryOptions(null).map((o) => o.to ?? o.action), ["keep", "dismiss", "urgent", "todo", "status"]);
 });
 
-test("a notification's responses: buttons, canned and suggested replies, without repeats", () => {
+test("a notification's responses: buttons and canned replies, without repeats, and Android's suggestions until Claude's arrive", () => {
   const json = JSON.stringify([
     { title: "Mark as read", action: 0, reply: null },
-    { title: "Reply", action: 1, reply: "On my way" },
-    { title: "Reply", action: 1, reply: "On my way" },
+    { title: "Reply", action: 1, reply: "On my way", canned: true },
+    { title: "Reply", action: 1, reply: "On my way", canned: true },
     { title: "Reply", action: 1, reply: "  " },
     { title: "", action: 2, reply: null },
+    { title: "Reply", action: 1, reply: null, freeForm: true },
+    { title: "Reply", action: 1, reply: "Ok", suggested: true },
   ]);
-  assert.deepEqual(parseResponses("k", json), [
-    { key: "k", index: 0, reply: null, label: "Mark as read" },
-    { key: "k", index: 1, reply: "On my way", label: 'Reply: "On my way"' },
-  ]);
-  assert.deepEqual(parseResponses("k", "nope"), []);
+  assert.deepEqual(parseResponses("k", json), {
+    typed: true,
+    responses: [
+      { key: "k", index: 0, reply: null, label: "Mark as read" },
+      { key: "k", index: 1, reply: "On my way", label: 'Reply: "On my way"' },
+      { key: "k", index: 1, reply: "Ok", label: 'Reply: "Ok"' },
+    ],
+  });
+  const withClaude = parseResponses("k", json, ["Yes, I'll get him", "Can't today", "What time?"]);
+  assert.deepEqual(withClaude.responses.map((r) => r.label), ["Mark as read", 'Reply: "On my way"', `Reply: "Yes, I'll get him"`, `Reply: "Can't today"`, 'Reply: "What time?"']);
+  assert.deepEqual(parseResponses("k", JSON.stringify([{ title: "Archive", action: 0, reply: null }])).typed, false);
+  assert.deepEqual(parseResponses("k", "nope"), { responses: [], typed: false });
 });
 
 test("acting locally moves the entry and keeps what Claude first said", () => {

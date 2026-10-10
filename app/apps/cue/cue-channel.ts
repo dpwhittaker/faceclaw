@@ -64,6 +64,8 @@ export type CueNotificationFrame = {
   subText: string;
   lines: string[];
   messages: { sender: string; text: string; time: number }[];
+  /** It has a reply field you'd type into: Claude suggests replies. */
+  canReply: boolean;
 };
 
 export type CueChannelEvents = {
@@ -73,6 +75,8 @@ export type CueChannelEvents = {
   onEndContext(contextId: string, reason: string): void;
   onAnswer(askId: string, text: string, done: boolean): void;
   onTriage(triage: CueTriage): void;
+  /** Claude's suggested replies to a message. */
+  onReplies(nid: string, replies: string[]): void;
   /** The backend's notebooks (the frame's `notebooks` array, as sent). */
   onNotebooks(notebooks: unknown[]): void;
   /** The backend took a context: who might be speaking in it. */
@@ -165,6 +169,11 @@ export class CueChannel {
 
   entry(notebook: string, entryId: string, action: "dismiss" | "move", to?: string): void {
     this.enqueue({ type: "entry", notebook, entryId, action, to });
+  }
+
+  /** Asks for Claude's suggested replies to a message, now. */
+  suggestReplies(nid: string): void {
+    this.enqueue({ type: "suggest-replies", nid });
   }
 
   statusClear(notebook: string): void {
@@ -300,6 +309,9 @@ export class CueChannel {
           body: String(frame.body ?? ""),
           app: String(frame.app ?? ""),
         });
+        return;
+      case "replies":
+        this.events.onReplies(String(frame.nid), Array.isArray(frame.replies) ? frame.replies.map(String) : []);
         return;
       case "notebooks":
         this.events.onNotebooks(Array.isArray(frame.notebooks) ? frame.notebooks : []);

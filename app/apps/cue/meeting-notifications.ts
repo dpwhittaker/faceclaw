@@ -23,6 +23,8 @@ export type FeedNotification = {
   lines: string[];
   messages: { sender: string; text: string; time: number }[];
   actions: string[];
+  /** It has a reply field you'd type into. */
+  replyable?: boolean;
 };
 
 export type MeetingNotice = {

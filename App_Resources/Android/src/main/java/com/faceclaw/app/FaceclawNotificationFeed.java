@@ -126,9 +126,10 @@ public final class FaceclawNotificationFeed {
     /**
      * What the glasses can send back for a notification, as a JSON array of
      * {title, action, reply}: its buttons that act without opening an app
-     * (reply null), the canned answers of its reply fields, and Android's
-     * suggested replies through its first free-form reply field. Empty once
-     * the notification is gone.
+     * (reply null), the canned answers of its reply fields, and, for its
+     * first free-form reply field, a {title, action, freeForm: true} for
+     * replies Cue suggests followed by Android's suggested replies
+     * (suggested: true). Empty once the notification is gone.
      */
     public static String responses(String key) {
         Notification.Action[] actions;
@@ -139,7 +140,7 @@ public final class FaceclawNotificationFeed {
         if (actions == null) {
             return out.toString();
         }
-        boolean suggested = false;
+        boolean freeFormSeen = false;
         try {
             for (int index = 0; index < actions.length; index++) {
                 Notification.Action action = actions[index];
@@ -152,13 +153,14 @@ public final class FaceclawNotificationFeed {
                     CharSequence[] choices = inputs[0].getChoices();
                     if (choices != null) {
                         for (CharSequence choice : choices) {
-                            putResponse(out, title, index, choice);
+                            putResponse(out, title, index, choice).put("canned", true);
                         }
                     }
-                    if (inputs[0].getAllowFreeFormInput() && !suggested) {
-                        suggested = true;
+                    if (inputs[0].getAllowFreeFormInput() && !freeFormSeen) {
+                        freeFormSeen = true;
+                        putResponse(out, title, index, null).put("freeForm", true);
                         for (CharSequence reply : FaceclawMediaNotificationListenerService.smartReplies(key)) {
-                            putResponse(out, title, index, reply);
+                            putResponse(out, title, index, reply).put("suggested", true);
                         }
                     }
                     continue;
@@ -175,18 +177,34 @@ public final class FaceclawNotificationFeed {
         return out.toString();
     }
 
-    private static void putResponse(JSONArray out, String title, int index, CharSequence reply) throws JSONException {
+    /** The action's reply field that takes typed text, if any. */
+    private static RemoteInput freeFormInput(Notification.Action action) {
+        RemoteInput[] inputs = action.getRemoteInputs();
+        if (inputs == null) {
+            return null;
+        }
+        for (RemoteInput input : inputs) {
+            if (input != null && input.getAllowFreeFormInput()) {
+                return input;
+            }
+        }
+        return null;
+    }
+
+    private static JSONObject putResponse(JSONArray out, String title, int index, CharSequence reply) throws JSONException {
         JSONObject response = new JSONObject();
         response.put("title", title);
         response.put("action", index);
         response.put("reply", reply == null ? JSONObject.NULL : reply.toString());
         out.put(response);
+        return response;
     }
 
     /**
      * Sends one of a notification's responses: its action, with the reply
-     * text in the action's first reply field when there is one. False when
-     * the notification is gone or its app canceled the action.
+     * text in its reply field (the first for one of its choices, the
+     * free-form one for typed text). False when the notification is gone
+     * or its app canceled the action.
      */
     public static boolean respond(String key, int index, String reply) {
         Notification.Action[] actions;
@@ -207,12 +225,19 @@ public final class FaceclawNotificationFeed {
             if (inputs == null || inputs.length == 0) {
                 return false;
             }
+            // One of the app's answers or Android's suggestions is a choice; anything else (Cue's) is typed.
+            boolean choice = contains(inputs[0].getChoices(), reply)
+                    || contains(FaceclawMediaNotificationListenerService.smartReplies(key).toArray(new CharSequence[0]), reply);
+            RemoteInput input = choice ? inputs[0] : freeFormInput(action);
+            if (input == null) {
+                return false;
+            }
             Intent fillIn = new Intent();
             Bundle results = new Bundle();
-            results.putCharSequence(inputs[0].getResultKey(), reply);
-            RemoteInput.addResultsToIntent(new RemoteInput[] { inputs[0] }, fillIn, results);
+            results.putCharSequence(input.getResultKey(), reply);
+            RemoteInput.addResultsToIntent(new RemoteInput[] { input }, fillIn, results);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                RemoteInput.setResultsSource(fillIn, RemoteInput.SOURCE_CHOICE);
+                RemoteInput.setResultsSource(fillIn, choice ? RemoteInput.SOURCE_CHOICE : RemoteInput.SOURCE_FREE_FORM_INPUT);
             }
             action.actionIntent.send(context, 0, fillIn);
             return true;
@@ -223,6 +248,18 @@ public final class FaceclawNotificationFeed {
             Log.w(TAG, "failed to send notification response", t);
             return false;
         }
+    }
+
+    private static boolean contains(CharSequence[] choices, String reply) {
+        if (choices == null) {
+            return false;
+        }
+        for (CharSequence choice : choices) {
+            if (choice != null && reply.contentEquals(choice)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void deliver(Listener listener, String json) {
@@ -270,14 +307,18 @@ public final class FaceclawNotificationFeed {
             out.put("messages", messages(extras.getParcelableArray(Notification.EXTRA_MESSAGES)));
         }
         JSONArray actions = new JSONArray();
+        boolean replyable = false;
         if (notification.actions != null) {
             for (Notification.Action action : notification.actions) {
                 if (action != null && action.title != null) {
                     actions.put(action.title.toString());
+                    replyable |= freeFormInput(action) != null;
                 }
             }
         }
         out.put("actions", actions);
+        // It can be answered by typing: Cue has Claude suggest replies.
+        out.put("replyable", replyable);
         return out;
     }
 

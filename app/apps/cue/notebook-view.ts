@@ -25,6 +25,8 @@ export type NotebookEntry = {
   title: string;
   /** The message, or a cue's detail. */
   body: string;
+  /** Claude's suggested replies, for a message you'd answer by typing. */
+  replies?: string[];
 };
 
 export type Notebook = {

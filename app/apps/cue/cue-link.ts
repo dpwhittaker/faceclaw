@@ -12,7 +12,7 @@ import { CueVoices } from "./cue-voices";
 import { EntryPopupLayer, type EntryPopup } from "./entry-layer";
 import { notificationId, routeNotification, type FeedNotification } from "./meeting-notifications";
 import { BACK, applyLocally, cueLine, entryOptions, type EntryCategory, type EntryOption, type Notebook, type NotebookEntry } from "./notebook-view";
-import { parseResponses, type NotificationResponse } from "./notification-responses";
+import { parseResponses, type NotificationResponse, type ParsedResponses } from "./notification-responses";
 
 declare const com: any;
 
@@ -22,7 +22,9 @@ declare const com: any;
  * calendar; everything else goes to the backend's triage, and the urgent
  * ones pop up over whatever app is in front, as do the urgent cues Claude
  * gives during a conversation. A notification's pop-up also offers what
- * the notification itself offers (Mark as read, suggested replies...).
+ * the notification itself offers (Mark as read...), and for one you'd
+ * answer by typing, the three replies Claude suggests (asked for when the
+ * pop-up opens, unless triage already had them made).
  * Faceclaw's own notification pop-ups stay off while this runs; if triage
  * hasn't answered within TRIAGE_WAIT_MS (backend down), the message pops up
  * plainly instead. The Cue window's conversations use the same connection,
@@ -56,6 +58,9 @@ class CueLink {
   private readonly seen = new Set<string>();
   // Android's key for each notification sent to triage, by id, for its responses.
   private readonly keys = new Map<string, string>();
+  // Claude's suggested replies by notification id, and the ids they've been asked for.
+  private readonly suggested = new Map<string, string[]>();
+  private readonly askedReplies = new Set<string>();
   private feedListener: any = null;
   private readonly calendar = new CueCalendarSync();
   private readonly termux = new CueTermuxSupervisor(() => this.status === "connected", (detail) => this.setDetail(detail));
@@ -147,13 +152,40 @@ class CueLink {
   entryPopup(notebook: Notebook, entry: NotebookEntry, extra: EntryOption[] = []): EntryPopup {
     const heading = entry.title ? `${entry.title} · ${notebook.label}` : notebook.label;
     const body = entry.contextId ? [cueLine(entry), entry.body].filter(Boolean).join("\n") : entry.body || entry.text;
-    return { category: entry.category, heading, body, options: [...entryOptions(entry.category), ...this.responses(entry.nid), ...extra] };
+    return this.livePopup(entry.category, heading, body, () => [...entryOptions(entry.category), ...this.responses(entry.nid), ...extra]);
   }
 
-  /** What a notification offers to send back, as options. */
+  /** A pop-up whose options are made again, and repainted, whenever Cue's state changes (suggested replies arriving). */
+  private livePopup(category: EntryCategory | null, heading: string, body: string, options: () => EntryOption[]): EntryPopup {
+    let made: EntryOption[] | null = null;
+    return {
+      category,
+      heading,
+      body,
+      get options() {
+        return (made ??= options());
+      },
+      onChange: (listener) => this.onChange(() => {
+        made = null;
+        listener();
+      }),
+    };
+  }
+
+  /**
+   * What a notification offers to send back, as options. One you'd answer
+   * by typing gets Claude's suggested replies, asked for the first time
+   * it's shown.
+   */
   private responses(nid: string | null): EntryOption[] {
     const key = nid ? this.keys.get(nid) : undefined;
-    return (key ? readResponses(key) : []).map((response) => ({ label: response.label, action: "respond", response }));
+    if (!nid || !key) return [];
+    const { responses, typed } = readResponses(key, this.suggested.get(nid) ?? []);
+    if (typed && !this.suggested.has(nid) && !this.askedReplies.has(nid)) {
+      this.askedReplies.add(nid);
+      this.channel.suggestReplies(nid);
+    }
+    return responses.map((response) => ({ label: response.label, action: "respond", response }));
   }
 
   private connect(): void {
@@ -198,6 +230,7 @@ class CueLink {
       subText: notification.subText,
       lines: notification.lines,
       messages: notification.messages,
+      canReply: notification.replyable === true,
     });
     this.waiting.set(nid, setTimeout(() => {
       this.waiting.delete(nid);
@@ -205,7 +238,7 @@ class CueLink {
       const body = notification.messages.length
         ? notification.messages.map((message) => `${message.sender ? `${message.sender}: ` : ""}${message.text}`).join("\n")
         : notification.bigText || notification.text;
-      this.popUp({ category: null, heading: `${notification.title} · ${notification.app}`, body, options: [BACK, ...this.responses(nid)] }, (option) =>
+      this.popUp(this.livePopup(null, `${notification.title} · ${notification.app}`, body, () => [BACK, ...this.responses(nid)]), (option) =>
         (option.response ? respond(option.response) : undefined));
     }, TRIAGE_WAIT_MS));
   }
@@ -228,7 +261,7 @@ class CueLink {
   /** An entry that just arrived, over whatever app is in front; acted on as the notebooks have it by then. */
   private popUpEntry(notebook: string, arrived: Pick<NotebookEntry, "id" | "category" | "text" | "nid" | "title" | "body" | "contextId">, heading: string, body: string): void {
     const category = arrived.category as EntryCategory;
-    this.popUp({ category, heading, body, options: [...entryOptions(category), ...this.responses(arrived.nid)] }, (option) => {
+    this.popUp(this.livePopup(category, heading, body, () => [...entryOptions(category), ...this.responses(arrived.nid)]), (option) => {
       const entry = this.books.find((book) => book.name === notebook)?.entries.find((candidate) => candidate.id === arrived.id)
         ?? { ...arrived, section: "day", day: null, firstCategory: category };
       return this.act(notebook, entry, option);
@@ -256,8 +289,12 @@ class CueLink {
       onEndContext: (contextId, reason) => this.conversation?.onEndContext(contextId, reason),
       onAnswer: (askId, text, done) => this.conversation?.onAnswer(askId, text, done),
       onTriage: (triage) => this.onTriage(triage),
+      onReplies: (nid, replies) => this.setSuggested(nid, replies),
       onNotebooks: (notebooks) => {
         this.books = notebooks as Notebook[];
+        for (const book of this.books) {
+          for (const entry of [...book.entries, ...book.status]) if (entry.nid && entry.replies?.length) this.setSuggested(entry.nid, entry.replies, false);
+        }
         this.notify();
       },
       onContextAck: (contextId, candidates) => this.conversation?.onContextAck(contextId, candidates),
@@ -277,6 +314,13 @@ class CueLink {
     };
   }
 
+  private setSuggested(nid: string, replies: string[], notify = true): void {
+    if (!replies.length) return;
+    this.suggested.set(nid, replies);
+    if (this.suggested.size > SEEN_KEPT) this.suggested.delete(this.suggested.keys().next().value as string);
+    if (notify) this.notify();
+  }
+
   private setDetail(detail: string): void {
     this.detail = detail;
     this.notify();
@@ -293,13 +337,13 @@ function notebookLabel(path: string): string {
   return parts[parts.length - 2] ?? path;
 }
 
-function readResponses(key: string): NotificationResponse[] {
-  if (!global.isAndroid) return [];
+function readResponses(key: string, claude: readonly string[]): ParsedResponses {
+  if (!global.isAndroid) return { responses: [], typed: false };
   try {
-    return parseResponses(key, String(com.faceclaw.app.FaceclawNotificationFeed.responses(key)));
+    return parseResponses(key, String(com.faceclaw.app.FaceclawNotificationFeed.responses(key)), claude);
   } catch (error) {
     console.warn(`[Cue] couldn't read a notification's responses: ${String(error)}`);
-    return [];
+    return { responses: [], typed: false };
   }
 }
 
