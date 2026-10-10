@@ -109,6 +109,8 @@ export class CueChannel {
   private queued: Frame[] = [];
   // The current context's switch, re-sent when a restarted backend needs it.
   private currentSwitch: CueSwitchFrame | null = null;
+  // The main screen's size, likewise.
+  private screenFrame: Frame | null = null;
   private attempt = 0;
   private retry: unknown = null;
   private generation = 0;
@@ -169,6 +171,12 @@ export class CueChannel {
 
   entry(notebook: string, entryId: string, action: "dismiss" | "move", to?: string): void {
     this.enqueue({ type: "entry", notebook, entryId, action, to });
+  }
+
+  /** The main screen's size in characters and lines, which Claude curates cues to fit. */
+  screen(columns: number, lines: number): void {
+    this.screenFrame = { type: "screen", columns, lines };
+    this.enqueue(this.screenFrame);
   }
 
   /** Asks for Claude's suggested replies to a message, now. */
@@ -251,6 +259,7 @@ export class CueChannel {
     this.phase = "ready";
     this.write({ type: "session-start", org: this.org });
     const queued = this.queued.splice(0);
+    if (this.screenFrame && !queued.some((frame) => frame.type === "screen")) this.write(this.screenFrame);
     if (this.currentSwitch && !queued.some((frame) => frame.type === "switch")) this.write({ type: "switch", ...this.currentSwitch });
     this.flush(queued);
   }

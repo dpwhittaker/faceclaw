@@ -27,6 +27,8 @@ export type NotebookEntry = {
   body: string;
   /** Claude's suggested replies, for a message you'd answer by typing. */
   replies?: string[];
+  /** A status cue Claude put away when its topic passed: in the status messages line, not on the main screen. */
+  shelved?: boolean;
 };
 
 export type Notebook = {
@@ -97,7 +99,8 @@ export function idleNotebookNames(notebooks: Notebook[], nowMs: number): string[
 }
 
 export type EntryRow =
-  | { kind: "entry"; notebook: Notebook; entry: NotebookEntry; text: string }
+  /** live: a cue of the conversation on now, shown with its detail. */
+  | { kind: "entry"; notebook: Notebook; entry: NotebookEntry; text: string; live: boolean }
   | { kind: "status"; count: number; text: string };
 
 const RANK: Record<EntryCategory, number> = { urgent: 0, todo: 1, status: 3 };
@@ -105,31 +108,49 @@ const rank = (entry: NotebookEntry) => (entry.category ? RANK[entry.category] : 
 
 /**
  * The main view's rows. In a conversation, its cues come first, status ones
- * too (they're what to have in view now): urgent, then todo, then status.
- * Then the shown notebooks' open entries, urgent first, then todo, then what
- * the memory run kept, each newest day first (in a combined view each
- * prefixed with its notebook). Then one line for the rest of the status
- * messages.
+ * too until Claude shelves them (they're what to have in view now): urgent,
+ * then todo, then status. Then the shown notebooks' open entries, urgent
+ * first, then todo, then what the memory run kept, each newest day first
+ * (in a combined view each prefixed with its notebook). Then one line for
+ * the rest of the status messages, shelved cues included; the conversation's
+ * notebook counts as shown.
  */
 export function entryRows(notebooks: Notebook[], names: string[], contextId: string | null = null): EntryRow[] {
-  const shown = notebooks.filter((notebook) => names.includes(notebook.name));
+  const ofContext = (notebook: Notebook) => [...notebook.entries, ...notebook.status].some((entry) => contextId && entry.contextId === contextId);
+  const shown = notebooks.filter((notebook) => names.includes(notebook.name) || ofContext(notebook));
   const combined = shown.length > 1;
   type Found = { notebook: Notebook; entry: NotebookEntry; index: number };
   const order = (a: Found, b: Found) => rank(a.entry) - rank(b.entry) || (b.entry.day ?? "").localeCompare(a.entry.day ?? "") || a.index - b.index;
   const live: Found[] = contextId
-    ? notebooks.flatMap((notebook) => [...notebook.entries, ...notebook.status].map((entry, index) => ({ notebook, entry, index }))).filter(({ entry }) => entry.contextId === contextId)
+    ? notebooks.flatMap((notebook) => [...notebook.entries, ...notebook.status].map((entry, index) => ({ notebook, entry, index })))
+      .filter(({ entry }) => entry.contextId === contextId && !(entry.section === "status" && entry.shelved))
     : [];
   const rest = shown.flatMap((notebook) => notebook.entries.map((entry, index) => ({ notebook, entry, index }))).filter(({ entry }) => !contextId || entry.contextId !== contextId);
-  const rows: EntryRow[] = [...live.sort(order), ...rest.sort(order)].map(({ notebook, entry }) => ({
+  const rows: EntryRow[] = [...live.sort(order).map((found) => ({ ...found, live: true })), ...rest.sort(order).map((found) => ({ ...found, live: false }))].map(({ notebook, entry, live }) => ({
     kind: "entry",
     notebook,
     entry,
-    text: `${entry.category ? `${ENTRY_ICONS[entry.category]} ` : "  "}${contextId && entry.contextId === contextId ? cueLine(entry) : `${combined ? `${notebook.label}: ` : ""}${dropTime(entry.text)}`}`,
+    live,
+    text: `${entry.category ? `${ENTRY_ICONS[entry.category]} ` : "  "}${live ? cueLine(entry) : `${combined ? `${notebook.label}: ` : ""}${dropTime(entry.text)}`}`,
   }));
   const inline = live.filter(({ notebook, entry }) => entry.section === "status" && shown.includes(notebook)).length;
   const count = shown.reduce((sum, notebook) => sum + notebook.statusCount, 0) - inline;
   if (count > 0) rows.push({ kind: "status", count, text: `${count} status message${count === 1 ? "" : "s"}` });
   return rows;
+}
+
+/**
+ * Which rows (of these heights) to draw so the selected one is on screen,
+ * scrolling as little as possible from the first row drawn last time. A row
+ * taller than the space still shows, clipped.
+ */
+export function rowWindow(heights: number[], selected: number, available: number, first = 0): { first: number; count: number } {
+  const height = (from: number, to: number) => heights.slice(from, to + 1).reduce((sum, h) => sum + h, 0);
+  first = Math.max(0, Math.min(first, selected));
+  while (first < selected && height(first, selected) > available) first += 1;
+  let count = 0;
+  while (first + count < heights.length && height(first, first + count) <= available) count += 1;
+  return { first, count: Math.max(count, first < heights.length ? 1 : 0) };
 }
 
 /** The status messages of the shown notebooks, newest first. */

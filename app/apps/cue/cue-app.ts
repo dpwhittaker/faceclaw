@@ -27,7 +27,7 @@ import { cueSession, type CueCaption, type CueState, type CueVoice } from "./cue
 import { cueBackendTokenSetting, cueBackendUrlSetting, cueEmailsSetting, cueNewPersonSetting, cueOrgSetting, cueTermuxCommandSetting, cueWorkCalendarSetting } from "./cue-settings";
 import { cueLink } from "./cue-link";
 import { EntryPopupLayer } from "./entry-layer";
-import { ENTRY_ICONS, cueLine, dropTime, entryRows, idleNotebookNames, statusEntries, type EntryOption, type EntryRow, type Notebook, type NotebookEntry } from "./notebook-view";
+import { ENTRY_ICONS, cueLine, dropTime, entryRows, idleNotebookNames, rowWindow, statusEntries, type EntryOption, type EntryRow, type Notebook, type NotebookEntry } from "./notebook-view";
 
 export const CUE_WINDOW_ID = "cue";
 export const CUE_SURFACE_ID = "window:cue";
@@ -97,6 +97,11 @@ function openEntry(ctx: LayerContext, notebook: Notebook, entry: NotebookEntry):
 }
 
 type MainRow = { kind: "ask" } | { kind: "note"; row: EntryRow };
+type RowLine = { text: string; value: number; indent: number };
+
+const DETAIL_INDENT = 10;
+/** Typical cue text, for the font's average character width. */
+const SAMPLE_TEXT = "Jude 14–15 quotes 1 Enoch 1:9 word for word. Only the Ethiopian Orthodox churches include it in their canon; the Catholic deuterocanon is Tobit, Judith, Maccabees, Wisdom, Sirach and Baruch.";
 
 /** The notebooks shown: Work on weekdays 8-6, the others combined otherwise. */
 function shownNotebooks(): string[] {
@@ -109,12 +114,17 @@ function shownNotebooks(): string[] {
  * top line says who's talking and in which context, its cues come first,
  * and while "Meeting over early?" is up that's the first row (a click on it
  * ends the meeting). Then the shown notebooks' open entries, and a line for
- * the status messages. Scroll selects, a click opens.
+ * the status messages. The conversation's cues show their detail under
+ * their line: all of it for the selected one, up to half the screen for the
+ * rest. Which context, or which notebooks, shares the bottom line with the
+ * gesture hints. Scroll selects, a click opens.
  */
 class CueMainLayer implements Layer {
   private state: CueState = cueSession.state();
   private unsubscribe: (() => void) | null = null;
   private selected = 0;
+  // The first row drawn, kept so scrolling moves as little as it can.
+  private first = 0;
 
   start(requestRender: () => void): void {
     this.unsubscribe = cueSession.onState((state) => {
@@ -137,16 +147,13 @@ class CueMainLayer implements Layer {
     const image = new GrayImage(width, height, 0);
     const state = this.state;
     const step = lineStep(font) + 1;
-    const rowHeight = step + 3;
     const textWidth = width - 24;
     let y = 4;
 
     const current = state.current;
     const shown = shownNotebooks();
     const labels = cueLink.notebooks.filter((notebook) => shown.includes(notebook.name)).map((notebook) => notebook.label);
-    const top = current ? [state.talking, contextLabel(current)].filter(Boolean).join(" · ") : `Cue${labels.length ? ` · ${labels.join(", ")}` : ""}`;
-    image.drawText(font, 12, y, truncateText(font, top, textWidth), 235);
-    y += step + 2;
+    const where = current ? [state.talking, contextLabel(current)].filter(Boolean).join(" · ") : `Cue${labels.length ? ` · ${labels.join(", ")}` : ""}`;
 
     const handOff = cueLink.recordings.status().detail;
     const problem = !state.listening ? state.status : state.backend !== "connected" ? state.backendDetail : handOff.startsWith("Couldn't") ? handOff : "";
@@ -158,34 +165,58 @@ class CueMainLayer implements Layer {
     const rows = this.rows();
     this.selected = Math.max(0, Math.min(this.selected, rows.length - 1));
     const footerY = height - font.lineHeight - 4;
-    const visible = Math.max(1, Math.floor((footerY - y - 2) / rowHeight));
-    const first = Math.max(0, Math.min(this.selected - visible + 1, rows.length - visible));
-    rows.slice(first, first + visible).forEach((row, index) => {
-      const rowY = y + index * rowHeight;
-      const selected = first + index === this.selected;
-      if (selected) drawSelectionHighlight(image, 8, rowY - 2, width - 16, rowHeight, true, 4);
-      const text = row.kind === "ask" ? `Meeting over early?   ${GESTURE_CLICK} end it` : row.row.text;
-      const dim = row.kind === "note" && (row.row.kind === "status" || row.row.entry.category === "status");
-      const value = selected ? 255 : row.kind === "ask" ? 235 : dim ? 140 : 200;
-      image.drawText(font, 12, rowY, truncateText(font, text, textWidth), value);
-    });
+    const available = footerY - y - 2;
+    const fit = Math.floor(available / step);
+    // Claude curates its cues to the screen: about this many characters across a detail line, and lines down.
+    cueLink.setScreen(Math.floor((textWidth - DETAIL_INDENT) / (font.measureText(SAMPLE_TEXT) / SAMPLE_TEXT.length)), problem ? fit + 1 : fit);
+    const laid = rows.map((row, index) => this.lines(row, index === this.selected, textWidth, fit));
+    const heights = laid.map((lines) => lines.length * step + 3);
+    const { first, count } = rowWindow(heights, this.selected, available, this.first);
+    this.first = first;
+    let rowY = y;
+    for (let index = first; index < first + count; index++) {
+      const selected = index === this.selected;
+      if (selected) drawSelectionHighlight(image, 8, rowY - 2, width - 16, Math.min(heights[index], footerY - rowY), true, 4);
+      laid[index].forEach((line, at) => {
+        const lineY = rowY + at * step;
+        if (lineY + step <= footerY) image.drawText(font, 12 + line.indent, lineY, line.text, selected ? Math.max(line.value, line.indent ? 225 : 255) : line.value);
+      });
+      rowY += heights[index];
+    }
     if (!rows.length) {
       const body = !cueLink.notebooks.length
         ? state.backend === "connected" ? "Loading the notebooks..." : "Cues and messages appear once Cue's backend is reachable."
         : current ? "No cues yet." : "Nothing in the notebooks. Talking starts a conversation: the meeting on now, or an ad-hoc chat.";
       for (const line of wrapText(font, body, textWidth)) {
-        image.drawText(font, 12, y, line, 150);
-        y += step;
+        image.drawText(font, 12, rowY, line, 150);
+        rowY += step;
       }
     }
-    if (state.paused.length && rows.length < visible) {
+    if (state.paused.length && rowY <= footerY - step) {
       const paused = state.paused.map((context) => contextLabel(context)).join(", ");
       image.drawText(font, 12, footerY - step, truncateText(font, `Paused: ${paused}`, textWidth), 110);
     }
 
-    const footer = gestureHints([[GESTURE_SCROLL, "select"], [GESTURE_CLICK, "open"], [GESTURE_SHORT_THEN_LONG_PRESS, "menu"]]);
-    image.drawText(font, 12, footerY, footer, 110);
+    const hints = gestureHints([[GESTURE_SCROLL, "select"], [GESTURE_CLICK, "open"], [GESTURE_SHORT_THEN_LONG_PRESS, "menu"]]);
+    const hintsX = width - 12 - font.measureText(hints);
+    image.drawText(font, 12, footerY, truncateText(font, where, Math.max(0, hintsX - 24)), 170);
+    image.drawText(font, hintsX, footerY, hints, 110);
     return image;
+  }
+
+  /** A row's lines: its text, and for a cue of the conversation on now, its detail (all of it when selected, as far as it fits). */
+  private lines(row: MainRow, selected: boolean, textWidth: number, fit: number): RowLine[] {
+    const font = getDefaultSmallFont();
+    if (row.kind === "ask") return [{ text: `Meeting over early?   ${GESTURE_CLICK} end it`, value: 235, indent: 0 }];
+    const entryRow = row.row;
+    const dim = entryRow.kind === "status" || entryRow.entry.category === "status";
+    const head = { text: truncateText(font, entryRow.text, textWidth), value: dim ? 140 : 200, indent: 0 };
+    if (entryRow.kind !== "entry" || !entryRow.live || !entryRow.entry.body.trim()) return [head];
+    const detail = wrapText(font, entryRow.entry.body.replace(/\n{2,}/g, "\n"), textWidth - DETAIL_INDENT);
+    const most = selected ? Math.max(1, fit - 1) : Math.max(2, Math.floor(fit / 2));
+    const shown = detail.slice(0, most);
+    if (detail.length > most) shown[most - 1] = truncateText(font, `${shown[most - 1]}…`, textWidth - DETAIL_INDENT);
+    return [head, ...shown.map((text) => ({ text, value: dim ? 135 : 165, indent: DETAIL_INDENT }))];
   }
 
   handleInput(event: InputEvent, ctx: LayerContext): void {
@@ -331,6 +362,21 @@ class NotebookListLayer implements Layer {
     });
     image.drawText(font, 12, footerY, gestureHints([[GESTURE_SCROLL, "select"], [GESTURE_CLICK, "open"], [GESTURE_DOUBLE_CLICK, "back"]]), 110);
     return image;
+  }
+
+  /** A row's lines: its text, and for a cue of the conversation on now, its detail (all of it when selected, as far as it fits). */
+  private lines(row: MainRow, selected: boolean, textWidth: number, fit: number): RowLine[] {
+    const font = getDefaultSmallFont();
+    if (row.kind === "ask") return [{ text: `Meeting over early?   ${GESTURE_CLICK} end it`, value: 235, indent: 0 }];
+    const entryRow = row.row;
+    const dim = entryRow.kind === "status" || entryRow.entry.category === "status";
+    const head = { text: truncateText(font, entryRow.text, textWidth), value: dim ? 140 : 200, indent: 0 };
+    if (entryRow.kind !== "entry" || !entryRow.live || !entryRow.entry.body.trim()) return [head];
+    const detail = wrapText(font, entryRow.entry.body.replace(/\n{2,}/g, "\n"), textWidth - DETAIL_INDENT);
+    const most = selected ? Math.max(1, fit - 1) : Math.max(2, Math.floor(fit / 2));
+    const shown = detail.slice(0, most);
+    if (detail.length > most) shown[most - 1] = truncateText(font, `${shown[most - 1]}…`, textWidth - DETAIL_INDENT);
+    return [head, ...shown.map((text) => ({ text, value: dim ? 135 : 165, indent: DETAIL_INDENT }))];
   }
 
   handleInput(event: InputEvent, ctx: LayerContext): void {

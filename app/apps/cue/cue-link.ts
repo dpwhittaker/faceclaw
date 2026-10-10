@@ -52,6 +52,7 @@ class CueLink {
   private books: Notebook[] = [];
   private conversation: CueConversationHandler | null = null;
   private memory: CueMemoryUpdate | null = null;
+  private screen: { columns: number; lines: number } | null = null;
   private readonly listeners = new Set<() => void>();
   // Notifications sent to triage, by id, until it answers (or the wait runs out).
   private readonly waiting = new Map<string, ReturnType<typeof setTimeout>>();
@@ -139,6 +140,13 @@ class CueLink {
     this.books = applyLocally(this.books, notebook, entry.id, option);
     this.channel.entry(notebook, entry.id, option.action, option.to);
     this.notify();
+  }
+
+  /** The main screen's size, sent when it changes (a display mode or font switch). */
+  setScreen(columns: number, lines: number): void {
+    if (this.screen?.columns === columns && this.screen.lines === lines) return;
+    this.screen = { columns, lines };
+    this.channel.screen(columns, lines);
   }
 
   /** Dismiss all: every status message of these notebooks. */

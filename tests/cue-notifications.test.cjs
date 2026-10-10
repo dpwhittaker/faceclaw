@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 
 const { notificationId, parseInvitation, routeNotification } = require("../.test-build/app/apps/cue/meeting-notifications.js");
 const { normalizeTitle, planMeeting } = require("../.test-build/app/apps/cue/meeting-sync.js");
-const { applyLocally, cueLine, entryOptions, entryRows, idleNotebookNames } = require("../.test-build/app/apps/cue/notebook-view.js");
+const { applyLocally, cueLine, entryOptions, entryRows, idleNotebookNames, rowWindow } = require("../.test-build/app/apps/cue/notebook-view.js");
 const { parseResponses } = require("../.test-build/app/apps/cue/notification-responses.js");
 
 const local = (y, mo, d, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime();
@@ -114,10 +114,31 @@ test("in a conversation its cues come first, status ones too, from whichever not
     [cue("q4", "status", "Tom said Q4"), entry("s1", "status", null, "09-28 08:00 SailPoint · approved")]);
   const church = notebook("church", [entry("c1", "todo", "2026-09-27", "18:00 Pastor Dan · lead prayer?")]);
   const rows = entryRows([work, church], ["church"], "ctx");
-  assert.deepEqual(rows.map((r) => r.text), ["‼ That's Dana", "◆ You owe Priya an RFC review", "○ Tom said Q4", "◆ Pastor Dan · lead prayer?"]);
+  assert.deepEqual(rows.map((r) => r.text), ["‼ That's Dana", "◆ You owe Priya an RFC review", "○ Tom said Q4", "‼ Work: Ivana · refresh failed", "◆ Church: Pastor Dan · lead prayer?", "1 status message"],
+    "the conversation's notebook (Work) shows beside Church");
   const atWork = entryRows([work], ["work"], "ctx");
   assert.deepEqual(atWork.map((r) => r.text).slice(3), ["‼ Ivana · refresh failed", "1 status message"], "the conversation's status cue isn't counted twice");
   assert.equal(cueLine(cue("rfc", "todo", "You owe Priya an RFC review")), "You owe Priya an RFC review");
+});
+
+test("a shelved status cue leaves the main screen for the status line; the conversation's notebook counts as shown", () => {
+  const work = notebook("work", [], [{ ...cue("q4", "status", "Tom said Q4"), shelved: true }, cue("ledger", "status", "Ledger resumes this week"), entry("s1", "status", null, "09-28 08:00 SailPoint · approved")]);
+  const general = notebook("general", [entry("g1", "todo", "2026-09-28", "09:00 Pay the water bill")]);
+  const rows = entryRows([work, general], ["general"], "ctx");
+  assert.deepEqual(rows.map((r) => [r.text, r.live ?? null]), [
+    ["○ Ledger resumes this week", true],
+    ["◆ General: Pay the water bill", false],
+    ["2 status messages", null],
+  ]);
+});
+
+test("rows of different heights scroll just enough to show the selected one", () => {
+  const heights = [40, 20, 60, 20, 20];
+  assert.deepEqual(rowWindow(heights, 0, 100), { first: 0, count: 2 });
+  assert.deepEqual(rowWindow(heights, 2, 100, 0), { first: 1, count: 3 }, "a tall selected row pushes the top off");
+  assert.deepEqual(rowWindow(heights, 1, 100, 1), { first: 1, count: 3 }, "scrolling back up keeps the view where it can");
+  assert.deepEqual(rowWindow([150, 20], 0, 100), { first: 0, count: 1 }, "too tall still shows, clipped");
+  assert.deepEqual(rowWindow([], 0, 100), { first: 0, count: 0 });
 });
 
 test("every entry offers Back first, then Dismiss and the categories it isn't", () => {

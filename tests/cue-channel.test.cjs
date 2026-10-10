@@ -86,6 +86,19 @@ test("a backend that forgot the session gets a new start and the current context
   assert.deepEqual(h.types(), ["resume", "session-start", "switch", "line"]);
 });
 
+test("the main screen's size goes to the backend, and again to a restarted backend's new session", () => {
+  const h = harness();
+  h.channel.start("ws://backend", "t", "s1", "work");
+  h.last().handlers.onOpen();
+  h.channel.screen(99, 28);
+  assert.deepEqual(h.last().sent.at(-1), { type: "screen", columns: 99, lines: 28, sessionId: "s1" });
+  h.drop();
+  h.retry();
+  h.last().handlers.onOpen();
+  h.reply({ type: "error", message: "unknown session; start a new one" });
+  assert.deepEqual(h.types(), ["resume", "session-start", "screen"]);
+});
+
 test("reconnect waits back off to 30 seconds", () => {
   const h = harness();
   h.channel.start("ws://backend", "t", "s1", "");
