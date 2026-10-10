@@ -1,6 +1,7 @@
 package com.faceclaw.app;
 
 import android.Manifest;
+import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -11,6 +12,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 
 import androidx.core.content.ContextCompat;
 
@@ -29,6 +31,10 @@ public class FaceclawForegroundService extends Service {
     private static final String LEGACY_CHANNEL_ID = "faceclaw-dashboard";
     private static final String CHANNEL_ID = "faceclaw-connection";
     private static final int NOTIFICATION_ID = 4201;
+    private static final String TAG = "FaceclawForeground";
+
+    /** The types the service holds; just connectedDevice after a start from the background. */
+    private int activeTypes = 0;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -41,6 +47,7 @@ public class FaceclawForegroundService extends Service {
         String text = intent != null ? intent.getStringExtra(EXTRA_TEXT) : null;
 
         if (ACTION_STOP.equals(action)) {
+            activeTypes = 0;
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
             return START_NOT_STICKY;
@@ -52,7 +59,7 @@ public class FaceclawForegroundService extends Service {
         );
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, foregroundServiceType());
+            startForegroundAllowed(notification);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
@@ -65,6 +72,39 @@ public class FaceclawForegroundService extends Service {
         }
 
         return START_STICKY;
+    }
+
+    /**
+     * Microphone and location are while-in-use permissions: Android 14+
+     * refuses a foreground service those types unless the app is on screen
+     * when it starts. The glasses reconnecting with the phone in a pocket
+     * restarts this service, and the refusal used to crash Faceclaw, then
+     * again on each relaunch. So ask for every type, and when that's refused
+     * keep connectedDevice, which holds the glasses link; the next start or
+     * update made while the app is on screen claims the rest. (G2 audio
+     * comes over Bluetooth and needs no microphone type; the phone's own
+     * mic does.)
+     */
+    private void startForegroundAllowed(Notification notification) {
+        int wanted = foregroundServiceType();
+        if (wanted != activeTypes && (activeTypes == 0 || onScreen())) {
+            try {
+                startForeground(NOTIFICATION_ID, notification, wanted);
+                activeTypes = wanted;
+                return;
+            } catch (RuntimeException e) {
+                Log.w(TAG, "foreground service types " + wanted + " refused, holding the glasses connection only: " + e.getMessage());
+            }
+        }
+        int types = activeTypes != 0 ? activeTypes : ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
+        startForeground(NOTIFICATION_ID, notification, types);
+        activeTypes = types;
+    }
+
+    private static boolean onScreen() {
+        ActivityManager.RunningAppProcessInfo info = new ActivityManager.RunningAppProcessInfo();
+        ActivityManager.getMyMemoryState(info);
+        return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
     }
 
     private void ensureNotificationChannel() {

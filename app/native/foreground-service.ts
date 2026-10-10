@@ -1,6 +1,18 @@
-import { Utils } from "@nativescript/core";
+import { Application, Utils } from "@nativescript/core";
 
 declare const com: any;
+
+/** The notification's text while the service runs. */
+let runningText: string | null = null;
+
+// A start from the background holds only the glasses connection (see
+// FaceclawForegroundService); an update made while the app is on screen
+// claims the microphone and location again, so send one on every resume.
+if (global.isAndroid) {
+  Application.on(Application.resumeEvent, () => {
+    if (runningText) updateForegroundNotification(runningText);
+  });
+}
 
 function getContext(): android.content.Context {
   const context = Utils.android.getApplicationContext();
@@ -23,16 +35,19 @@ export function startForegroundNotification(text: string): void {
   const context = getContext();
   const intent = createIntent(com.faceclaw.app.FaceclawForegroundService.ACTION_START, text);
   androidx.core.content.ContextCompat.startForegroundService(context, intent);
+  runningText = text;
 }
 
 export function updateForegroundNotification(text: string): void {
   if (!global.isAndroid) return;
   const context = getContext();
   context.startService(createIntent(com.faceclaw.app.FaceclawForegroundService.ACTION_UPDATE, text));
+  runningText = text;
 }
 
 export function stopForegroundNotification(): void {
   if (!global.isAndroid) return;
   const context = getContext();
+  runningText = null;
   context.startService(createIntent(com.faceclaw.app.FaceclawForegroundService.ACTION_STOP));
 }
