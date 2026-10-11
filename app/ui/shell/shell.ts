@@ -16,6 +16,7 @@ import {
   makeInputEvent,
 } from "../gestures";
 import { Layer, LayerActions, LayerContext, LayerStack, noopLayerActions } from "../layers";
+import { playSoundEffect, type SoundEffect } from "../sound-effects";
 import { CONTEXT_MENU_DIM, MenuLayer, type MenuItem } from "../menu";
 import { VoiceInputLayer, type VoiceSendTarget } from "./voice-input";
 import { KeyboardInputLayer, type KeyboardInputSession } from "./keyboard-input";
@@ -678,12 +679,17 @@ class Shell {
 
   /**
    * Show any layer in a shell modal over whatever app is in front (Cue's
-   * pop-ups). Wakes the screen if needed; the returned function closes the
-   * modal (and puts a screen it woke back to sleep). The layer gets every
+   * pop-ups). Wakes the screen if needed, and plays `sound` on the glasses'
+   * speaker if given (an urgent pop-up's chime); the returned function closes
+   * the modal (and puts a screen it woke back to sleep). The layer gets every
    * click and scroll while it's up, so it must call the closer itself.
    */
-  openModal(layer: Layer): () => void {
+  openModal(layer: Layer, sound?: SoundEffect): () => void {
     const wokeScreen = this.screenOn ? false : this.wake("sidebar");
+    if (sound) {
+      void playSoundEffect(sound, (payload) => this.config.actions.playBuzzerSequence(payload), (ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+        .catch((error) => console.warn(`[shell] ${sound.name} sound failed: ${error}`));
+    }
     const modal = new ShellModalLayer(layer, this.config.actions);
     this.stack.push(modal);
     this.config.requestShellRender();

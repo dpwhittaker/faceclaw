@@ -249,7 +249,7 @@ function shellEnv({ wakeAction = 'voice-input', skipConfirmation = false } = {})
     assistantSkipConfirmationSetting: { get: () => skipConfirmation } };
   const { shell, rawInputEventToInputEvent } = load('app/ui/shell/shell.ts', {
     '../../graphics/image': images, '../../graphics/plane': {}, '../../graphics/ui-fonts': {}, '../../g2/events': load('app/g2/events.ts', {}),
-    '../gestures': gestures, '../layers': layers, '../menu': { MenuLayer: Menu },
+    '../gestures': gestures, '../layers': layers, '../menu': { MenuLayer: Menu }, '../sound-effects': {},
     '../input-monitor': load('app/ui/input-monitor.ts', {}),
     './voice-input': { VoiceInputLayer: class {
       constructor(options) { this.options = options; voiceDialogs.push(options); }

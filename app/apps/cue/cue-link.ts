@@ -13,6 +13,7 @@ import { EntryPopupLayer, type EntryPopup } from "./entry-layer";
 import { notificationId, routeNotification, type FeedNotification } from "./meeting-notifications";
 import { BACK, applyLocally, cueLine, entryOptions, type EntryCategory, type EntryOption, type Notebook, type NotebookEntry } from "./notebook-view";
 import { parseResponses, type NotificationResponse, type ParsedResponses } from "./notification-responses";
+import { findSoundEffect, type SoundEffect } from "../../ui/sound-effects";
 
 declare const com: any;
 
@@ -39,6 +40,8 @@ const SEEN_KEPT = 500;
 export type CueConversationHandler = Pick<CueChannelEvents, "onEndContext" | "onAnswer" | "onContextAck" | "onSpeaker">;
 
 const MEMORY_CARD_SECONDS = 10;
+/** An urgent pop-up's chime on the glasses' speaker: short, two notes up. */
+const URGENT_SOUND = findSoundEffect("notify");
 
 class CueLink {
   readonly channel = new CueChannel(androidCueTransport, this.events());
@@ -266,20 +269,20 @@ class CueLink {
     this.popUpEntry(cue.notebook, { id: cue.entryId, category: "urgent", text: cue.line, nid: null, title: cue.title, body: cue.detail, contextId: cue.contextId }, cue.line, cue.detail || cue.title);
   }
 
-  /** An entry that just arrived, over whatever app is in front; acted on as the notebooks have it by then. */
+  /** An entry that just arrived, over whatever app is in front; acted on as the notebooks have it by then. An urgent one chimes. */
   private popUpEntry(notebook: string, arrived: Pick<NotebookEntry, "id" | "category" | "text" | "nid" | "title" | "body" | "contextId">, heading: string, body: string): void {
     const category = arrived.category as EntryCategory;
     this.popUp(this.livePopup(category, heading, body, () => [...entryOptions(category), ...this.responses(arrived.nid)]), (option) => {
       const entry = this.books.find((book) => book.name === notebook)?.entries.find((candidate) => candidate.id === arrived.id)
         ?? { ...arrived, section: "day", day: null, firstCategory: category };
       return this.act(notebook, entry, option);
-    });
+    }, category === "urgent" ? URGENT_SOUND : undefined);
   }
 
-  /** A pop-up over whatever app is in front. */
-  private popUp(popup: EntryPopup, choose: (option: EntryOption) => string | void): void {
+  /** A pop-up over whatever app is in front, waking the screen if it's off, with an optional sound. */
+  private popUp(popup: EntryPopup, choose: (option: EntryOption) => string | void, sound?: SoundEffect): void {
     let close = () => {};
-    close = shell.openModal(new EntryPopupLayer(popup, choose, () => close()));
+    close = shell.openModal(new EntryPopupLayer(popup, choose, () => close()), sound);
   }
 
   private events(): CueChannelEvents {
