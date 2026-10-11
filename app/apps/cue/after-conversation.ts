@@ -1,4 +1,4 @@
-import { identify, pool, scoreCandidates, type PrintStore } from "./voiceprints";
+import { MAYBE, identify, pool, scoreCandidates, type PrintStore } from "./voiceprints";
 
 /**
  * After a conversation: naming who said each live line, for the hand-off.
@@ -6,7 +6,8 @@ import { identify, pool, scoreCandidates, type PrintStore } from "./voiceprints"
  * voice-printed from the recording and matched against the people Cue
  * knows. A confident match names the run even against the name the live
  * voice was given (live numbers get reused for someone else); otherwise
- * the live name stands, as a guess unless the wearer confirmed it. Pure,
+ * the live name stands, as a guess unless the wearer confirmed it; with no
+ * live name, the closest print is a guess if it's close enough. Pure,
  * so it runs under node tests; cue-recordings.ts does the I/O.
  */
 
@@ -89,7 +90,8 @@ export function nameLines(
     } else if (voice?.name) {
       who = { personId: voice.personId, name: voice.name, confidence: voice.confirmed ? "medium" : "low" };
     } else {
-      who = { personId: null, name: identity ? names.get(identity.personId) ?? null : null, confidence: "low" };
+      // Only a guess worth the name: "Unknown 3 (maybe Priya)".
+      who = { personId: null, name: identity && identity.similarity >= MAYBE ? names.get(identity.personId) ?? null : null, confidence: "low" };
     }
     for (const index of run.lines) {
       const line = lines[index];

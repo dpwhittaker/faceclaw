@@ -28,6 +28,12 @@ export const KNOWN = 0.5;
 export const KNOWN_MARGIN = 0.1;
 export const LIKELY = 0.45;
 export const LIKELY_MARGIN = 0.05;
+/**
+ * A guess below this says nothing: in the 2026-10-04 small group, different
+ * people's prints scored up to about 0.43 against each other, and a short
+ * "Yeah" came out as someone who wasn't there at 0.16.
+ */
+export const MAYBE = 0.35;
 
 export function similarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
   if (a.length !== b.length || !a.length) return 0;
