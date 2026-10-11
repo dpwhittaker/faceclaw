@@ -165,6 +165,8 @@ export const SOUND_EFFECTS: SoundEffect[] = [
       [{ freq: 2000, duty: 22, ms: 6 }] },
   { name: "doublebeep", desc: "two clean beeps", make: () =>
       [{ freq: 1568, duty: 50, ms: 60 }, rest(60), { freq: 1568, duty: 50, ms: 60 }] },
+  { name: "blip", desc: "short, soft low blip (Cue's urgent pop-up)", make: () =>
+      [{ freq: 660, duty: 20, ms: 50 }] },
   { name: "sonar", desc: "single sonar ping", make: () =>
       [{ freq: 1400, duty: 50, ms: 40 }, { freq: 1350, duty: 30, ms: 120 }] },
 

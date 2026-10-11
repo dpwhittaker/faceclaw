@@ -680,7 +680,7 @@ class Shell {
   /**
    * Show any layer in a shell modal over whatever app is in front (Cue's
    * pop-ups). Wakes the screen if needed, and plays `sound` on the glasses'
-   * speaker if given (an urgent pop-up's chime); the returned function closes
+   * speaker if given (an urgent pop-up's blip); the returned function closes
    * the modal (and puts a screen it woke back to sleep). The layer gets every
    * click and scroll while it's up, so it must call the closer itself.
    */

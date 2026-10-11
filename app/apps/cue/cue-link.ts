@@ -40,8 +40,8 @@ const SEEN_KEPT = 500;
 export type CueConversationHandler = Pick<CueChannelEvents, "onEndContext" | "onAnswer" | "onContextAck" | "onSpeaker">;
 
 const MEMORY_CARD_SECONDS = 10;
-/** An urgent pop-up's chime on the glasses' speaker: short, two notes up. */
-const URGENT_SOUND = findSoundEffect("notify");
+/** An urgent pop-up's sound on the glasses' speaker: one short, soft, low blip. */
+const URGENT_SOUND = findSoundEffect("blip");
 
 class CueLink {
   readonly channel = new CueChannel(androidCueTransport, this.events());
