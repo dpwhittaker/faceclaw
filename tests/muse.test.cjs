@@ -10,7 +10,7 @@ const { BdfFont } = load('app/graphics/bdffont.ts');
 const { parseAbc, parseKey, tokenizeLyrics, DIVISIONS } = load('app/apps/muse/core/abc.ts');
 const { buildDocument, parseMarkdown, inlineText, fileKind } = load('app/apps/muse/core/document.ts');
 const { splitFrontMatter, writeSettings, DEFAULT_SETTINGS } = load('app/apps/muse/core/front-matter.ts');
-const { layoutDocument, withClef } = load('app/apps/muse/core/document-layout.ts');
+const { layoutDocument, withClef, textWords } = load('app/apps/muse/core/document-layout.ts');
 const { SAMPLE_MARKDOWN } = load('app/apps/muse/core/sample.ts');
 
 const terminus = (name) => BdfFont.parse(fs.readFileSync(path.join(__dirname, '../app/fonts/terminus', name), 'utf8'));
@@ -236,4 +236,22 @@ test('clef override moves the music an octave into the other clef', () => {
   same(notesOf(bass).map((n) => n.step), [5, 10]); // E3 and C4 on the bass staff
   same(notesOf(withClef(bass, 'treble')).map((n) => n.step), [0, 5]);
   assert.equal(withClef(treble, 'auto'), treble);
+});
+
+test('stage directions: words wholly inside [brackets] or (parentheses)', () => {
+  const flags = (text) => textWords(text).map((line) => line.map((w) => `${w.text}${w.direction ? '*' : ''}`).join(' '));
+  same(flags('[wonder] Have you [wipe sweat] ever'), ['[wonder]* Have you [wipe* sweat]* ever']);
+  // Nesting carries across a line break, and punctuation-only words are never directions.
+  same(flags('(She is holding\na walkie-talkie.) Do not — Gary'), ['(She* is* holding*', 'a* walkie-talkie.)* Do not — Gary']);
+  same(flags('it(s) 1) first'), ['it(s) 1) first']);
+});
+
+test('layout: directions are drawn dim and left out of the words to follow', () => {
+  const md = '# Smith\n\n*[wonder]* Have you ever\n*[inform]* Did you know\n\n*(Unclosed aside\n\nBack to lines.';
+  const layout = layoutDocument(buildDocument(md, 'markdown'), DEFAULT_SETTINGS, 560, fontAt);
+  same(layout.words, ['smith', 'have', 'you', 'ever', 'did', 'you', 'know', 'back', 'to', 'lines']);
+  const values = (row) => new Set(layout.rows[row].image.pixels);
+  assert.ok(values(1).has(100), 'the cue is drawn dim');
+  assert.ok(values(1).has(220), 'the line is drawn at body brightness');
+  assert.ok(!values(4).has(100), 'an unclosed ( dims only its own paragraph');
 });

@@ -40,7 +40,8 @@ muse:
 
 Paragraphs, lists, quotes and headings show as text. Line breaks inside a
 paragraph are kept, so a script written one beat per line reads that way.
-Inline markup is dropped.
+Stage directions, meaning words wholly inside `[brackets]` or `(parentheses)`,
+are drawn dim and left out of voice following. Inline markup is dropped.
 
 ```abc
 X:1

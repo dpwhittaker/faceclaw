@@ -47,6 +47,8 @@ export type MuseLayout = {
 const STYLE_SCALE: Record<TextStyle, number> = { title: 1.4, heading: 1.2, subheading: 1.05, body: 1, code: 0.9 };
 const STYLE_VALUE: Record<TextStyle, number> = { title: 255, heading: 255, subheading: 255, body: 220, code: 170 };
 const QUOTE_VALUE = 190;
+/** Stage directions: readable, but clearly not lines to say. */
+const DIRECTION_VALUE = 100;
 const MARKER_VALUE = 160;
 const QUOTE_BAR_VALUE = 120;
 const RULE_VALUE = 110;
@@ -132,27 +134,71 @@ function gapBefore(item: DocItem, previous: DocItem, bodyLine: number, settings:
 
 type TextItem = Extract<DocItem, { kind: 'text' }>;
 
-/** Greedy word wrap; '\n' always breaks. Each line keeps where its words start. */
-function wrap(text: string, font: UiFont, maxWidth: number): { text: string; starts: number[] }[] {
-  const lines: { text: string; starts: number[] }[] = [];
-  for (const source of text.split('\n')) {
-    let line = '';
-    let starts: number[] = [];
-    for (const word of source.split(/\s+/)) {
+/** A word as written, and whether it is a stage direction (shown dim, never listened for). */
+export type TextWord = { text: string; direction: boolean };
+
+/**
+ * A paragraph's words, line by line. A word is a stage direction when all of
+ * its letters sit inside [brackets] or (parentheses): "[wonder]", or every
+ * word of "(She is holding a walkie-talkie.)". Nesting carries across line
+ * breaks but not past the paragraph, so a stray "(" dims one paragraph at most.
+ */
+export function textWords(text: string): TextWord[][] {
+  let depth = 0;
+  return text.split('\n').map((line) => {
+    const words: TextWord[] = [];
+    for (const word of line.split(/\s+/)) {
       if (!word) continue;
-      const candidate = line ? `${line} ${word}` : word;
-      if (line && font.measureText(candidate) > maxWidth) {
-        lines.push({ text: line, starts });
-        line = word;
-        starts = [0];
+      let spoken = false;
+      let inside = false;
+      for (const c of word) {
+        if (c === '[' || c === '(') depth++;
+        else if (c === ']' || c === ')') depth = Math.max(0, depth - 1);
+        else if (/[\p{L}\p{N}]/u.test(c)) {
+          if (depth > 0) inside = true;
+          else spoken = true;
+        }
+      }
+      words.push({ text: word, direction: inside && !spoken });
+    }
+    return words;
+  });
+}
+
+type WrappedLine = { text: string; words: TextWord[]; starts: number[] };
+
+/** Greedy word wrap; '\n' always breaks. Each line keeps where its words start. */
+function wrap(lines: TextWord[][], font: UiFont, maxWidth: number): WrappedLine[] {
+  const out: WrappedLine[] = [];
+  for (const words of lines) {
+    let line: WrappedLine = { text: '', words: [], starts: [] };
+    for (const word of words) {
+      const candidate = line.text ? `${line.text} ${word.text}` : word.text;
+      if (line.text && font.measureText(candidate) > maxWidth) {
+        out.push(line);
+        line = { text: word.text, words: [word], starts: [0] };
       } else {
-        starts.push(line ? line.length + 1 : 0);
-        line = candidate;
+        line.starts.push(line.text ? line.text.length + 1 : 0);
+        line.words.push(word);
+        line.text = candidate;
       }
     }
-    lines.push({ text: line, starts });
+    out.push(line);
   }
-  return lines;
+  return out;
+}
+
+/** Draw a wrapped line as runs of spoken words and of directions, each at its brightness. */
+function drawLine(image: GrayImage, font: UiFont, x: number, line: WrappedLine, value: number): void {
+  let runStart = 0;
+  for (let w = 1; w <= line.words.length; w++) {
+    if (w < line.words.length && line.words[w].direction === line.words[runStart].direction) continue;
+    const from = line.starts[runStart];
+    const to = line.starts[w - 1] + line.words[w - 1].text.length;
+    const runValue = line.words[runStart].direction ? DIRECTION_VALUE : value;
+    image.drawText(font, x + font.measureText(line.text.slice(0, from)), 0, line.text.slice(from, to), runValue);
+    runStart = w;
+  }
 }
 
 function layoutText(
@@ -172,25 +218,23 @@ function layoutText(
   const textX = quoteInset + markerWidth;
   const value = item.quote ? QUOTE_VALUE : STYLE_VALUE[item.style];
   let y = top;
-  wrap(item.text, font, Math.max(40, width - rowX - textX)).forEach((line, index) => {
+  wrap(textWords(item.text), font, Math.max(40, width - rowX - textX)).forEach((line, index) => {
     const marker = index === 0 ? item.marker : undefined;
     if (line.text || marker || item.quote) {
       const image = new GrayImage(Math.max(1, textX + font.measureText(line.text)), rowHeight, 0);
       if (item.quote) image.fillRect(0, 0, 2, rowHeight, QUOTE_BAR_VALUE);
       if (marker) image.drawText(font, quoteInset, 0, marker, MARKER_VALUE);
-      if (line.text) image.drawText(font, textX, 0, line.text, value);
+      if (line.text) drawLine(image, font, textX, line, value);
       const row = out.rows.length;
       out.rows.push({ x: rowX, y, height: rowHeight, image: image.withDrawsBaked() });
-      line.starts.forEach((start, w) => {
-        const end = w + 1 < line.starts.length ? line.starts[w + 1] - 1 : line.text.length;
-        const word = line.text.slice(start, end);
-        const key = normalizeWord(word);
+      line.words.forEach((word, w) => {
+        const key = word.direction ? '' : normalizeWord(word.text);
         if (!key) return;
         out.words.push(key);
         out.anchors.push({
           row,
-          x: rowX + textX + font.measureText(line.text.slice(0, start)),
-          width: font.measureText(word),
+          x: rowX + textX + font.measureText(line.text.slice(0, line.starts[w])),
+          width: font.measureText(word.text),
           underlineY: lineHeight,
         });
       });
