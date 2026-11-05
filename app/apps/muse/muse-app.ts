@@ -26,7 +26,8 @@ import {
 } from "./recent-files";
 
 export const MUSE_WINDOW_ID = "muse:main";
-export const MUSE_SURFACE_ID = "window:muse";
+/** In-process windows draw to `window:<windowId>` (see in-process-window.ts). */
+export const MUSE_SURFACE_ID = `window:${MUSE_WINDOW_ID}`;
 
 /** readTextFile stops at this many characters; writing back a cut-off file would lose its end. */
 const READ_LIMIT_CHARS = 500_000;

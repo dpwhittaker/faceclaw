@@ -5,6 +5,10 @@ import { DEFAULT_RANGE, geometry, layoutScore, renderLines, type StepRange } fro
 import { textWidth } from './font5x8';
 import type { ClefChoice, MuseSettings } from './front-matter';
 import type { Score } from './score-types';
+import { isLetter, NUMBER_CLASS } from '../../../util/unicode-class';
+
+// The phone's V8 cannot parse \p{...} in a regex literal (see unicode-class.ts).
+const NUMBER_RE = new RegExp(`[${NUMBER_CLASS}]`);
 
 /**
  * Lays a document out as a column of rows, each one image: a line of text,
@@ -154,7 +158,7 @@ export function textWords(text: string): TextWord[][] {
       for (const c of word) {
         if (c === '[' || c === '(') depth++;
         else if (c === ']' || c === ')') depth = Math.max(0, depth - 1);
-        else if (/[\p{L}\p{N}]/u.test(c)) {
+        else if (isLetter(c) || NUMBER_RE.test(c)) {
           if (depth > 0) inside = true;
           else spoken = true;
         }

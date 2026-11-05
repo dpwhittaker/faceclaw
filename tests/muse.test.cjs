@@ -255,3 +255,12 @@ test('layout: directions are drawn dim and left out of the words to follow', () 
   assert.ok(values(1).has(220), 'the line is drawn at body brightness');
   assert.ok(!values(4).has(100), 'an unclosed ( dims only its own paragraph');
 });
+
+test('no \\p{...} regexes: the phone\'s V8 cannot parse them, and the whole bundle fails to load', () => {
+  const dir = path.join(__dirname, '../app/apps/muse');
+  const files = fs.readdirSync(dir, { recursive: true }).filter((f) => String(f).endsWith('.ts'));
+  for (const file of files) {
+    const source = fs.readFileSync(path.join(dir, String(file)), 'utf8');
+    assert.ok(!/\\p\{/.test(source.replace(/\/\/.*$/gm, '')), `${file} uses a Unicode property escape`);
+  }
+});
