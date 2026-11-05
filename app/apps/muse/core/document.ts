@@ -171,18 +171,13 @@ export function parseMarkdown(source: string): DocItem[] {
 }
 
 /**
- * Join a paragraph's source lines with spaces, as Markdown does, except
- * after a hard break (two trailing spaces or a backslash).
+ * Join a paragraph's source lines, keeping each line break (as Obsidian and
+ * GitHub comments show them, not as strict Markdown joins them): a script
+ * written one beat per line reads that way. A trailing backslash, Markdown's
+ * explicit break, is dropped.
  */
 function joinParagraph(parts: string[]): string {
-  let out = '';
-  parts.forEach((raw, index) => {
-    const hard = / {2,}$/.test(raw) || /\\$/.test(raw);
-    const line = inlineText(raw.replace(/\\$/, '').trim());
-    out += line;
-    if (index < parts.length - 1) out += hard ? '\n' : ' ';
-  });
-  return out;
+  return parts.map((raw) => inlineText(raw.replace(/\\$/, '').trim())).join('\n');
 }
 
 const ESCAPABLE = /\\([\\`*_{}[\]()#+\-.!>~|])/g;

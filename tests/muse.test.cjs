@@ -136,7 +136,7 @@ test('the sample hymn: bass clef, G major, two verses aligned to the same notes'
 
 // ── Markdown ───────────────────────────────────────────────────────────────
 
-test('markdown structure: headings, paragraphs, breaks, lists, quotes, rules, code', () => {
+test('markdown structure: headings, paragraphs (line breaks kept), lists, quotes, rules, code', () => {
   const items = parseMarkdown([
     '# Title', 'Setext', '---', 'one', 'two  ', 'three', '', '- a', '  more', '1. b', '> said', '***',
     '```', 'x = 1', '```', '```abc', 'K:C', 'C', '```',
@@ -145,8 +145,8 @@ test('markdown structure: headings, paragraphs, breaks, lists, quotes, rules, co
   same(brief, [
     ['title', 'Title', '', false],
     ['heading', 'Setext', '', false],
-    ['body', 'one two\nthree', '', false],
-    ['body', 'a more', '•', false],
+    ['body', 'one\ntwo\nthree', '', false],
+    ['body', 'a\nmore', '•', false],
     ['body', 'b', '1.', false],
     ['body', 'said', '', true],
     ['rule'],

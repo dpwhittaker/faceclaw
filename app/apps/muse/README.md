@@ -38,7 +38,9 @@ muse:
 ---
 # Title
 
-Paragraphs, lists, quotes and headings show as text. Inline markup is dropped.
+Paragraphs, lists, quotes and headings show as text. Line breaks inside a
+paragraph are kept, so a script written one beat per line reads that way.
+Inline markup is dropped.
 
 ```abc
 X:1
