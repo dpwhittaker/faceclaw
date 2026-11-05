@@ -23,6 +23,7 @@ import minesweeperApp from "./minesweeper";
 import freecellApp from "./freecell";
 import pinballApp from "./pinball";
 import flappyApp from "./flappy";
+import museApp from "./muse";
 import developerApp from "./developer";
 import evenhubApp from "./evenhub";
 import glanceboardApp from "./glanceboard";
@@ -58,6 +59,7 @@ export const ALL_APPS: readonly AppDefinition[] = [
   freecellApp,
   pinballApp,
   flappyApp,
+  museApp,
   developerApp,
   evenhubApp,
   glanceboardApp,
