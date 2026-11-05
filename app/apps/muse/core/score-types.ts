@@ -1,17 +1,19 @@
-// Types-only slice of sheet-music-test src/musicxml.ts (no DOM parser — Muse
-// embeds a pre-parsed Score, see sample-score.ts).
+// What the engraver draws: one melody line as measures of notes. The ABC
+// reader (abc.ts) produces it; the shape began as sheet-music-test's MusicXML
+// types.
 
 export type NoteType = 'whole' | 'half' | 'quarter' | 'eighth' | '16th';
 export type Syllabic = 'single' | 'begin' | 'middle' | 'end';
 export type Accidental = 'sharp' | 'flat' | 'natural';
+export type Clef = 'treble' | 'bass';
 
 export type NoteEvent = {
   rest: boolean;
-  /** `<rest measure="yes">`: the whole bar rests, drawn centred. */
+  /** A whole-bar rest, drawn centred. */
   measureRest: boolean;
-  /** Treble-staff step: 0 = E4 (bottom line), 1 = F4 … 8 = F5 (top line). Absent for rests. */
+  /** Staff step: 0 = the bottom line (E4 in treble, G2 in bass) … 8 = the top line. Absent for rests. */
   step?: number;
-  /** Chromatic alteration from `<alter>`: -1 flat, +1 sharp. */
+  /** Chromatic alteration: -1 flat, +1 sharp. */
   alter: number;
   /** In divisions of a quarter note (see `Score.divisions`). */
   duration: number;
@@ -40,6 +42,6 @@ export type Measure = {
 export type Score = {
   /** Divisions per quarter note. */
   divisions: number;
+  clef: Clef;
   measures: Measure[];
 };
-

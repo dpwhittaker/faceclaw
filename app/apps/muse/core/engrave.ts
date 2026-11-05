@@ -2,16 +2,17 @@ import { type Bitmap, createBitmap, drawSprite, fillRect } from './bitmap';
 import { FONT_5X8, drawText, textWidth, type BitmapFont } from './font5x8';
 import { FONT_7X10 } from './font-clr7x10';
 import { FONT_8X12 } from './font-clr8x12';
-import type { Measure, NoteEvent, Score } from './musicxml-types';
+import type { Clef, Measure, NoteEvent, Score } from './score-types';
 
 /**
- * Pixel engraver for the G2. A score becomes a 576px-wide strip of bands, one
- * system per band, 4 or 6 bands to the 288px screen (72px or 48px each). A
- * band holds a staff (1px lines; 4, 6 or 8px pitch for small, medium or large
- * notes), room for two ledger lines below it, and a lyric row at the bottom
- * in a 5x8, 7x10 or 8x12 font. The strip is sliced into 288x144 clips, left
- * and right, two or three systems each. Every combination is allowed; the
- * big ones overlap (a low note's ledger lines run into the lyrics).
+ * Pixel engraver for the G2. A score becomes a strip of bands (576px wide by
+ * default), one system per band, 4 or 6 bands to the 288px screen (72px or
+ * 48px each). A band holds a treble or bass staff (1px lines; 4, 6 or 8px
+ * pitch for small, medium or large notes), room above or below it for the
+ * ledger lines the score's range needs, and a lyric row at the bottom in a
+ * 5x8, 7x10 or 8x12 font. The strip is sliced into 288x144 clips, left and
+ * right, two or three systems each. Every combination is allowed; the big
+ * ones overlap (a low note's ledger lines run into the lyrics).
  *
  * The default (6 staves, medium notes, small font) is a 25px staff with 2px
  * above it and an 8px lyric row at the bottom of a 48px band.
@@ -58,8 +59,8 @@ export type NoteGlyphs = {
   fermata: readonly string[];
   /** Augmentation dots are squares this size. */
   dot: number;
-  /** Treble clef; `anchor` is its top row relative to the staff top (negative = above). */
-  clef: Glyph;
+  /** Clef glyphs; `anchor` is the top row relative to the staff top (negative = above). */
+  clefs: Record<Clef, Glyph>;
   quarterPx: number;
   minSlotPx: number;
   /** How far a ledger line sticks out past the notehead on each side. */
@@ -141,6 +142,27 @@ const CLEF = [
   '.X.X.....',
   '..XX.....',
 ];
+/** 12 wide, 18 tall; drawn from the top line, the blob and the two dots straddling the F line. */
+const BASS_CLEF = [
+  '..XXXXX.....',
+  '.X.....XX...',
+  'X.......X.XX',
+  'X.......X.XX',
+  'X........X..',
+  'XXX......X..',
+  'XXXX.....X..',
+  'XXX......X..',
+  '.........X..',
+  '........X.XX',
+  '........X.XX',
+  '.......X....',
+  '......X.....',
+  '.....X......',
+  '....X.......',
+  '...X........',
+  '.XX.........',
+  'X...........',
+];
 
 const MEDIUM: NoteGlyphs = {
   pitch: 6,
@@ -158,7 +180,7 @@ const MEDIUM: NoteGlyphs = {
   restEighth: { rows: REST_EIGHTH, anchor: 10 },
   fermata: FERMATA,
   dot: 2,
-  clef: { rows: CLEF, anchor: -2 },
+  clefs: { treble: { rows: CLEF, anchor: -2 }, bass: { rows: BASS_CLEF, anchor: 0 } },
   quarterPx: 20,
   minSlotPx: 15,
   ledgerOverhang: 3,
@@ -181,7 +203,7 @@ const SMALL: NoteGlyphs = {
   restEighth: scaleGlyph(MEDIUM.restEighth, 2 / 3),
   fermata: ['.XXX.', 'X...X', '..X..'],
   dot: 2,
-  clef: scaleGlyph(MEDIUM.clef, 2 / 3),
+  clefs: { treble: scaleGlyph(MEDIUM.clefs.treble, 2 / 3), bass: scaleGlyph(MEDIUM.clefs.bass, 2 / 3) },
   quarterPx: 16,
   minSlotPx: 12,
   ledgerOverhang: 2,
@@ -213,7 +235,7 @@ const LARGE: NoteGlyphs = {
   restEighth: scaleGlyph(MEDIUM.restEighth, 4 / 3),
   fermata: scaleSprite(FERMATA, 4 / 3),
   dot: 3,
-  clef: scaleGlyph(MEDIUM.clef, 4 / 3),
+  clefs: { treble: scaleGlyph(MEDIUM.clefs.treble, 4 / 3), bass: scaleGlyph(MEDIUM.clefs.bass, 4 / 3) },
   quarterPx: 24,
   minSlotPx: 18,
   ledgerOverhang: 3,
@@ -237,20 +259,29 @@ export type Geometry = {
   lyricY: number;
 };
 
+/** Lowest and highest staff steps a score reaches; the band makes room for both. */
+export type StepRange = { min: number; max: number };
+/** Two ledger lines below the staff and nothing above it: a hymn melody in treble. */
+export const DEFAULT_RANGE: StepRange = { min: -4, max: 8 };
+
 /**
- * The lyric row sits at the bottom of the band. The staff starts 2px from the
- * top; any room left over below two ledger lines is split evenly above and
- * below the staff, so a roomy band does not bunch everything at the top.
+ * The lyric row sits at the bottom of the band. Above the staff there is room
+ * for the notes over the top line (2px when there are none); below it, for
+ * the notes under the bottom line. Any room left over is split evenly above
+ * and below, so a roomy band does not bunch everything at the top.
  */
-export function geometry(opts: EngraveOptions = DEFAULT_OPTIONS): Geometry {
+export function geometry(opts: EngraveOptions = DEFAULT_OPTIONS, range: StepRange = DEFAULT_RANGE): Geometry {
   const n = NOTE_GLYPHS[opts.notes];
   const font = LYRIC_FONTS[opts.font];
   const bandH = SCREEN_H / opts.staves;
   const staffH = 4 * n.pitch;
-  const headH = n.headFilled.length;
+  const step = n.pitch / 2;
+  const headHalf = Math.ceil(n.headFilled.length / 2);
   const lyricY = bandH - font.h;
-  const spare = lyricY - (2 + staffH + 2 * n.pitch + Math.ceil(headH / 2));
-  const staffTop = 2 + Math.max(0, Math.floor(spare / 2));
+  const above = range.max > 8 ? (range.max - 8) * step + headHalf : 2;
+  const below = Math.max(0, -range.min) * step + headHalf;
+  const spare = lyricY - (above + staffH + below);
+  const staffTop = above + Math.max(0, Math.floor(spare / 2));
   return {
     opts,
     n,
@@ -259,7 +290,7 @@ export function geometry(opts: EngraveOptions = DEFAULT_OPTIONS): Geometry {
     bandsPerClip: CLIP_H / bandH,
     staffTop,
     staffBottom: staffTop + staffH,
-    step: n.pitch / 2,
+    step,
     lyricY,
   };
 }
@@ -330,9 +361,11 @@ export function rowOfStep(step: number, g: Geometry = DEFAULT_GEOMETRY): number 
   return g.staffBottom - step * g.step;
 }
 
-/** Key-signature glyph steps, in the order they are written on a treble staff. */
-const SHARP_STEPS = [8, 5, 9, 6, 3, 7, 4];
-const FLAT_STEPS = [4, 7, 3, 6, 2, 5, 1];
+/** Key-signature glyph steps, in the order they are written; bass sits a third (two steps) below treble. */
+const KEY_STEPS: Record<Clef, { sharp: number[]; flat: number[] }> = {
+  treble: { sharp: [8, 5, 9, 6, 3, 7, 4], flat: [4, 7, 3, 6, 2, 5, 1] },
+  bass: { sharp: [6, 3, 7, 4, 1, 5, 2], flat: [2, 5, 1, 4, 0, 3, -1] },
+};
 
 // ── Layout ─────────────────────────────────────────────────────────────────
 
@@ -355,6 +388,7 @@ export type LaidMeasure = {
 
 export type Line = {
   index: number;
+  clef: Clef;
   /** Key signature in force at the start of the line. */
   fifths: number;
   measures: LaidMeasure[];
@@ -370,8 +404,8 @@ function keySigWidth(fifths: number, n: NoteGlyphs): number {
   return Math.abs(fifths) * n.keyAdvance;
 }
 
-function leadingWidth(fifths: number, n: NoteGlyphs): number {
-  return 1 + n.clef.rows[0].length + 3 + keySigWidth(fifths, n) + (fifths ? 3 : 0);
+function leadingWidth(fifths: number, n: NoteGlyphs, clef: Clef): number {
+  return 1 + n.clefs[clef].rows[0].length + 3 + keySigWidth(fifths, n) + (fifths ? 3 : 0);
 }
 
 /** Lay out one measure's notes starting at x = 0; returns notes and total width. */
@@ -397,9 +431,9 @@ export function layoutScore(score: Score, g: Geometry = DEFAULT_GEOMETRY, lineWi
   let cursor = 0;
 
   const open = () => {
-    current = { index: lines.length, fifths, measures: [], width: 0 };
+    current = { index: lines.length, clef: score.clef, fifths, measures: [], width: 0 };
     lines.push(current);
-    cursor = leadingWidth(fifths, g.n);
+    cursor = leadingWidth(fifths, g.n, score.clef);
   };
 
   for (const m of score.measures) {
@@ -418,7 +452,7 @@ export function layoutScore(score: Score, g: Geometry = DEFAULT_GEOMETRY, lineWi
       fifths = keyChange;
       if (current!.measures.length === 0) {
         current!.fifths = fifths;
-        cursor = leadingWidth(fifths, g.n);
+        cursor = leadingWidth(fifths, g.n, score.clef);
         laid = layoutMeasure(m, score.divisions, g);
       }
     }
@@ -442,8 +476,8 @@ function drawGlyph(b: Bitmap, x: number, row: number, glyph: Glyph): void {
   drawSprite(b, x, row - glyph.anchor, glyph.rows);
 }
 
-function drawKeySignature(b: Bitmap, x: number, y0: number, fifths: number, g: Geometry): number {
-  const steps = fifths > 0 ? SHARP_STEPS : FLAT_STEPS;
+function drawKeySignature(b: Bitmap, x: number, y0: number, fifths: number, clef: Clef, g: Geometry): number {
+  const steps = fifths > 0 ? KEY_STEPS[clef].sharp : KEY_STEPS[clef].flat;
   const glyph = fifths > 0 ? g.n.sharp : g.n.flat;
   for (let i = 0; i < Math.abs(fifths); i++) drawGlyph(b, x + i * g.n.keyAdvance, y0 + rowOfStep(steps[i], g), glyph);
   return keySigWidth(fifths, g.n);
@@ -530,10 +564,11 @@ function drawNote(b: Bitmap, laid: LaidNote, y0: number, g: Geometry): { headX: 
 }
 
 /**
- * Render laid-out lines into a strip `LINE_W` wide and a whole number of clip
- * rows tall, so slicing needs no edge case.
+ * Render laid-out lines into a strip `width` wide (`LINE_W` unless the lines
+ * were laid out narrower) and a whole number of clip rows tall, so slicing
+ * needs no edge case.
  */
-export function renderLines(lines: Line[], g: Geometry = DEFAULT_GEOMETRY): Bitmap {
+export function renderLines(lines: Line[], g: Geometry = DEFAULT_GEOMETRY, width = LINE_W): Bitmap {
   const { n, font } = g;
   const headW = n.headFilled[0].length;
   const headH = n.headFilled.length;
@@ -543,16 +578,17 @@ export function renderLines(lines: Line[], g: Geometry = DEFAULT_GEOMETRY): Bitm
   const arcFrom = headW - 3;
   const arcTo = Math.floor(headW / 2) - 1;
   const clipRows = Math.max(1, Math.ceil(lines.length / g.bandsPerClip));
-  const b = createBitmap(LINE_W, clipRows * CLIP_H);
+  const b = createBitmap(width, clipRows * CLIP_H);
   lines.forEach((line, li) => {
     const y0 = li * g.bandH;
-    for (let i = 0; i < 5; i++) fillRect(b, 0, y0 + g.staffTop + i * n.pitch, LINE_W, 1, STAFF_LINE_GREY);
-    drawSprite(b, 1, y0 + g.staffTop + n.clef.anchor, n.clef.rows);
-    drawKeySignature(b, 1 + n.clef.rows[0].length + 3, y0, line.fifths, g);
+    const clef = n.clefs[line.clef];
+    for (let i = 0; i < 5; i++) fillRect(b, 0, y0 + g.staffTop + i * n.pitch, width, 1, STAFF_LINE_GREY);
+    drawSprite(b, 1, y0 + g.staffTop + clef.anchor, clef.rows);
+    drawKeySignature(b, 1 + clef.rows[0].length + 3, y0, line.fifths, line.clef, g);
 
     let pendingTie: { x: number; cy: number; below: boolean } | null = null;
     for (const measure of line.measures) {
-      if (measure.keyChange !== undefined) drawKeySignature(b, measure.x + MEASURE_PAD_LEFT, y0, measure.keyChange, g);
+      if (measure.keyChange !== undefined) drawKeySignature(b, measure.x + MEASURE_PAD_LEFT, y0, measure.keyChange, line.clef, g);
       let pendingSlur: { x: number; cy: number; below: boolean } | null = null;
       for (const laid of measure.notes) {
         const { note } = laid;

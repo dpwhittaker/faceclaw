@@ -1,29 +1,25 @@
-import { launchWorkerAppWindow, type AppDefinition } from "../app-definition";
+import { type AppDefinition } from "../app-definition";
+import { createMuseAppWindow, MUSE_SURFACE_ID, MUSE_WINDOW_ID } from "./muse-app";
 
 /**
- * Muse — a sheet-music reader for the G2, ported from the sheet-music-test
- * EvenHub app but built for faceclaw CFW. Where the EvenHub version showed two
- * systems at a time on a 2x2 grid and highlighted the half you were singing
- * (because stock can only re-upload whole image containers), Muse engraves the
- * whole hymn once and smooth-scrolls it: each system is a cached image draw, so
- * scrolling costs a tiny placement record per band rather than a re-send.
- *
- * Controls: scroll-up/down (ring scroll or watch crown) nudge the score; click
- * toggles auto-scroll; tap-then-long opens the window menu (speed, jump to top).
+ * Muse — a reader for songs and spoken text on the G2: Markdown files with
+ * ABC sheet music in them, plain text, or ABC files. It scrolls smoothly
+ * (each line of text and system of music goes to the glasses once, then
+ * just moves) and follows your voice through the words and the lyrics.
  */
 const museApp: AppDefinition = {
   appId: "muse",
   title: "Muse",
   icon: "music",
   launch: (ctx) =>
-    launchWorkerAppWindow(ctx, {
-      createWorker: () => new Worker("./muse-app.worker"),
-      windowId: "muse:main",
-      title: "Muse",
-      iconLetter: "M",
-      icon: "music",
-      acceptsDirectional: true,
-    }),
+    ctx.launchInProcessApp(MUSE_WINDOW_ID, MUSE_SURFACE_ID, (options) =>
+      createMuseAppWindow({
+        ...options,
+        startContinuousVoiceCapture: () => void options.actions.startContinuousVoiceCapture(),
+        stopContinuousVoiceCapture: () => void options.actions.stopContinuousVoiceCapture(),
+        appendLog: (message) => ctx.appendLog(message),
+      }),
+    ),
 };
 
 export default museApp;
